@@ -1,0 +1,53 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kotlin/Java
+*.class
+*.log
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# Local configuration
+local.properties
+*.local
+
+# Secrets (never commit these)
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+secrets.json
+*-secret.*
+*.secrets
+
+# Test output
+test-output/
+out/
+
+# Maven (if used)
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+
+# Misc
+*.bak
+*.tmp
+*.temp
