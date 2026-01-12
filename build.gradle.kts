@@ -1,10 +1,10 @@
 plugins {
-    kotlin("jvm")
-    kotlin("plugin.serialization")
+    kotlin("jvm") version "2.0.21"
+    kotlin("plugin.serialization") version "2.0.21"
 }
 
-group = "com.github.kotlintubeexplode"
-version = "1.0.0-SNAPSHOT"
+group = "com.github.scgreenhalgh"
+version = "1.0.1"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
