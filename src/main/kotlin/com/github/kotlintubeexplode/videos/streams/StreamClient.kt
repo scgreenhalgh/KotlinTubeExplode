@@ -151,8 +151,9 @@ class StreamClient internal constructor(
      * file paths from user input, always validate and sanitize the path first.
      *
      * @param streamInfo The stream to download
-     * @param filePath The destination file path (caller must validate for security)
+     * @param filePath The destination file path
      * @param onProgress Progress callback (0.0 to 1.0)
+     * @throws IllegalArgumentException if the path points to an existing directory
      */
     suspend fun download(
         streamInfo: IStreamInfo,
@@ -160,13 +161,23 @@ class StreamClient internal constructor(
         onProgress: ((Double) -> Unit)? = null
     ) {
         val file = java.io.File(filePath)
+
+        // Security check: Ensure we are not writing to a directory
+        // Note: Full path traversal prevention is the caller's responsibility
+        // as we accept absolute paths here.
+        if (file.exists() && file.isDirectory) {
+            throw IllegalArgumentException("Path is a directory: $filePath")
+        }
+
         try {
             file.outputStream().use { output ->
                 copyTo(streamInfo, output, onProgress)
             }
         } catch (e: Exception) {
             // Clean up partial file on failure
-            file.delete()
+            if (file.exists()) {
+                file.delete()
+            }
             throw e
         }
     }

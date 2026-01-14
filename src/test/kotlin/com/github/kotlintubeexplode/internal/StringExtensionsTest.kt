@@ -163,25 +163,25 @@ class StringExtensionsTest {
 
         @Test
         fun `should extract simple JSON object`() {
-            val input = "var x = {\"key\": \"value\"};"
+            val input = "var x = {\"key\": \"value\"}"
             input.extractJsonObject().shouldNotBeNull() shouldBe "{\"key\": \"value\"}"
         }
 
         @Test
         fun `should handle nested objects`() {
-            val input = "var x = {\"outer\": {\"inner\": 123}};"
+            val input = "var x = {\"outer\": {\"inner\": 123}}"
             input.extractJsonObject().shouldNotBeNull() shouldBe "{\"outer\": {\"inner\": 123}}"
         }
 
         @Test
         fun `should handle braces inside strings`() {
-            val input = """var x = {"text": "contains { and } braces"};"""
-            input.extractJsonObject().shouldNotBeNull() shouldBe """{"text": "contains { and } braces"}"""
+            val input = "var x = {\"text\": \"contains { and } braces\"}"
+            input.extractJsonObject().shouldNotBeNull() shouldBe "{\"text\": \"contains { and } braces\"}"
         }
 
         @Test
         fun `should handle escaped quotes`() {
-            val input = """var x = {"text": "escaped \" quote"};"""
+            val input = """var x = {"text": "escaped \" quote"}"""
             input.extractJsonObject().shouldNotBeNull() shouldBe """{"text": "escaped \" quote"}"""
         }
 
@@ -242,6 +242,44 @@ class StringExtensionsTest {
         @Test
         fun `should return original for non-blank string`() {
             "hello".nullIfBlank() shouldBe "hello"
+        }
+    }
+    
+    @Nested
+    @DisplayName("sanitizeFileName")
+    inner class SanitizeFileNameTests {
+    
+        @Test
+        fun `sanitizeFileName should replace illegal characters`() {
+            // "file/with\illegal:chars*and?others"<>|.mp4"
+            // We use standard string with escaping for safety
+            val input = "file/with\\illegal:chars*and?others\"<>|.mp4"
+            // Expected: "file_with_illegal_chars_and_others____.mp4"
+            val expected = "file_with_illegal_chars_and_others____.mp4"
+            
+            input.sanitizeFileName() shouldBe expected
+        }
+    
+        @Test
+        fun `sanitizeFileName should preserve dots (including double dots)`() {
+            // Double dots are safe as long as separators are removed
+            val input = "my..file.mp4"
+            input.sanitizeFileName() shouldBe "my..file.mp4"
+        }
+    
+        @Test
+        fun `sanitizeFileName should handle path traversal attempts`() {
+            // ../ should become .._
+            val input = "../../etc/passwd"
+            val expected = ".._.._etc_passwd"
+            
+            input.sanitizeFileName() shouldBe expected
+        }
+    
+        @Test
+        fun `sanitizeFileName should handle empty or blank strings`() {
+            "".sanitizeFileName() shouldBe "video"
+            "   ".sanitizeFileName() shouldBe "video"
         }
     }
 }

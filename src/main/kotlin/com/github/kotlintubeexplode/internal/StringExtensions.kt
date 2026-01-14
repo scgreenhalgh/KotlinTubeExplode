@@ -245,6 +245,20 @@ fun String.urlEncode(): String = try {
 }
 
 /**
+ * Sanitizes a string for use as a filename.
+ *
+ * Replaces illegal characters (/, \, :, *, ?, ", <, >, |) with underscores.
+ * Also trims the string and ensures it's not empty.
+ *
+ * @return Safe filename string
+ */
+fun String.sanitizeFileName(): String {
+    val invalidChars = Regex("""[\\/:*?"<>|]""")
+    val sanitized = replace(invalidChars, "_").trim()
+    return sanitized.ifBlank { "video" }
+}
+
+/**
  * Parses URL query parameters into a map.
  *
  * @return Map of parameter names to values

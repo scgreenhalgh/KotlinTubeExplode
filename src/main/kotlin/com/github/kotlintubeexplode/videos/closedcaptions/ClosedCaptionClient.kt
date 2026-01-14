@@ -2,7 +2,6 @@ package com.github.kotlintubeexplode.videos.closedcaptions
 
 import com.github.kotlintubeexplode.common.Language
 import com.github.kotlintubeexplode.core.VideoId
-import com.github.kotlintubeexplode.exceptions.KotlinTubeExplodeException
 import com.github.kotlintubeexplode.internal.HttpController
 import com.github.kotlintubeexplode.internal.VideoController
 import com.github.kotlintubeexplode.internal.dto.ClosedCaptionTrackResponseDto
@@ -138,8 +137,21 @@ class ClosedCaptionClient internal constructor(
         filePath: String,
         onProgress: ((Double) -> Unit)? = null
     ) {
-        File(filePath).bufferedWriter().use { writer ->
-            writeToSrt(trackInfo, writer, onProgress)
+        val file = File(filePath)
+
+        if (file.exists() && file.isDirectory) {
+            throw IllegalArgumentException("Path is a directory: $filePath")
+        }
+
+        try {
+            file.bufferedWriter().use { writer ->
+                writeToSrt(trackInfo, writer, onProgress)
+            }
+        } catch (e: Exception) {
+            if (file.exists()) {
+                file.delete()
+            }
+            throw e
         }
     }
 
