@@ -49,14 +49,17 @@ internal class VideoController(
         private const val PLAYER_API_URL = "https://www.youtube.com/youtubei/v1/player"
 
         /**
-         * Android client user agent.
+         * Android VR client user agent (Oculus Quest 3).
+         * YouTube requires PO tokens for standard Android/iOS clients, but
+         * ANDROID_VR still works without them.
          */
-        private const val ANDROID_USER_AGENT = "com.google.android.youtube/20.10.38 (Linux; U; ANDROID 11) gzip"
+        private const val ANDROID_VR_USER_AGENT =
+            "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; Quest 3 Build/SQ3A.220605.009.A1) gzip"
 
         /**
-         * Android client version.
+         * Android VR client version.
          */
-        private const val ANDROID_CLIENT_VERSION = "20.10.38"
+        private const val ANDROID_VR_CLIENT_VERSION = "1.60.19"
 
         /**
          * TV Embedded client name - used for age-restricted videos.
@@ -179,7 +182,7 @@ internal class VideoController(
         cachedVisitorData?.let { return it }
 
         val headers = mapOf(
-            "User-Agent" to ANDROID_USER_AGENT,
+            "User-Agent" to ANDROID_VR_USER_AGENT,
             "Accept" to "application/json"
         )
 
@@ -216,10 +219,11 @@ internal class VideoController(
     }
 
     /**
-     * Gets player response using the Android client.
+     * Gets player response using the Android VR client (Oculus Quest 3).
      *
-     * The Android client can access streams that the web client cannot,
-     * and typically provides higher quality streams without cipher protection.
+     * YouTube now requires Proof of Origin (PO) tokens for standard Android/iOS
+     * clients, causing 403 errors on stream downloads. The ANDROID_VR client
+     * bypasses this requirement while maintaining full format access.
      *
      * @param videoId The video ID
      * @return The player response
@@ -240,10 +244,12 @@ internal class VideoController(
             put("contentCheckOk", true)
             putJsonObject("context") {
                 putJsonObject("client") {
-                    put("clientName", "ANDROID")
-                    put("clientVersion", ANDROID_CLIENT_VERSION)
+                    put("clientName", "ANDROID_VR")
+                    put("clientVersion", ANDROID_VR_CLIENT_VERSION)
+                    put("deviceMake", "Oculus")
+                    put("deviceModel", "Quest 3")
                     put("osName", "Android")
-                    put("osVersion", "11")
+                    put("osVersion", "12L")
                     put("platform", "MOBILE")
                     put("visitorData", visitorData)
                     put("hl", "en")
@@ -262,7 +268,7 @@ internal class VideoController(
         }.toString()
 
         val headers = mapOf(
-            "User-Agent" to ANDROID_USER_AGENT
+            "User-Agent" to ANDROID_VR_USER_AGENT
         )
 
         val response = httpController.postJson(PLAYER_API_URL, requestBody, headers)

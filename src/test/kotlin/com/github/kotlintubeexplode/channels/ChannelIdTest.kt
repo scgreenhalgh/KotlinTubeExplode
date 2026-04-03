@@ -44,6 +44,18 @@ class ChannelIdTest {
         }
 
         @Test
+        fun `tryParse should return null for truncated UC-only channel ID`() {
+            // YouTube sometimes returns malformed channel IDs like just "UC"
+            // These should be rejected as invalid
+            ChannelId.tryParse("UC") shouldBe null
+        }
+
+        @Test
+        fun `tryParse should return null for short UC prefix IDs`() {
+            ChannelId.tryParse("UC123") shouldBe null
+        }
+
+        @Test
         fun `isValid should return true for valid ID`() {
             ChannelId.isValid("UCuAXFkgsw1L7xaCfnd5JJOw") shouldBe true
         }

@@ -196,6 +196,10 @@ class SearchClient internal constructor(
             "shortBylineText", "runs", "0", "navigationEndpoint", "browseEndpoint", "browseId"
         ) ?: ""
 
+        // Some videos have invalid channel IDs (e.g. just "UC"). These videos are
+        // generally unplayable anyway, so skip them.
+        if (authorId.isNotEmpty() && ChannelId.tryParse(authorId) == null) return null
+
         val durationText = renderer.findString("lengthText", "simpleText")
         val durationSeconds = parseDurationText(durationText)
 
