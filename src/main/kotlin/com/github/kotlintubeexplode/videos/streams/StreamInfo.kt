@@ -52,6 +52,10 @@ interface IVideoStreamInfo : IStreamInfo {
 
     /** The video resolution in pixels. */
     val videoResolution: Resolution
+
+    /** Whether this stream was produced by YouTube's Super Resolution (AI upscaling). */
+    val isVideoUpscaled: Boolean
+        get() = false
 }
 
 /**
@@ -81,7 +85,8 @@ data class VideoOnlyStreamInfo(
     override val bitrate: Bitrate,
     override val videoCodec: String,
     override val videoQuality: VideoQuality,
-    override val videoResolution: Resolution
+    override val videoResolution: Resolution,
+    override val isVideoUpscaled: Boolean = false
 ) : IVideoStreamInfo {
     override fun toString(): String = "Video-only ($videoQuality | $container)"
 }
@@ -99,7 +104,8 @@ data class MuxedStreamInfo(
     override val isAudioLanguageDefault: Boolean? = null,
     override val videoCodec: String,
     override val videoQuality: VideoQuality,
-    override val videoResolution: Resolution
+    override val videoResolution: Resolution,
+    override val isVideoUpscaled: Boolean = false
 ) : IAudioStreamInfo, IVideoStreamInfo {
     override fun toString(): String = "Muxed ($videoQuality | $container)"
 }

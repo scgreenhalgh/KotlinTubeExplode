@@ -1,6 +1,7 @@
 package com.github.kotlintubeexplode.videos.streams
 
 import com.github.kotlintubeexplode.internal.HttpController
+import com.github.kotlintubeexplode.internal.setQueryParameter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -37,8 +38,9 @@ internal class MediaStream(
          * Builds a segment URL with Range query parameter.
          */
         fun getSegmentUrl(streamUrl: String, from: Long, to: Long): String {
-            val separator = if (streamUrl.contains("?")) "&" else "?"
-            return "${streamUrl}${separator}range=$from-$to"
+            // Use setQueryParameter so a pre-existing range= on the URL gets replaced
+            // rather than duplicated. CDN behavior on duplicate range params is undefined.
+            return streamUrl.setQueryParameter("range", "$from-$to")
         }
     }
 
@@ -162,7 +164,17 @@ internal class MediaStream(
      */
     fun isThrottled(): Boolean = streamInfo.isThrottled
 
-    // Standard InputStream methods (blocking versions)
+    // Standard InputStream methods (blocking versions).
+    //
+    // ⚠️ Deadlock warning: these read() overrides bridge to the suspend `readAsync` via
+    // `runBlocking`. Calling them from a coroutine context whose dispatcher shares a thread
+    // pool with `Dispatchers.IO` (which `readAsync` uses internally) can deadlock — the
+    // current thread is blocked waiting for an IO thread that may never run because all
+    // available IO threads are busy waiting on this same call.
+    //
+    // **From coroutine code, prefer `readAsync(...)` directly.** These overrides exist for
+    // interop with `java.io.InputStream` consumers (file copies, third-party libs) and are
+    // safe when the caller isn't already inside a coroutine.
 
     override fun read(): Int {
         val buffer = ByteArray(1)
@@ -173,7 +185,6 @@ internal class MediaStream(
     override fun read(b: ByteArray): Int = read(b, 0, b.size)
 
     override fun read(b: ByteArray, off: Int, len: Int): Int {
-        // Blocking read - use runBlocking in a coroutine context
         return kotlinx.coroutines.runBlocking {
             readAsync(b, off, len)
         }

@@ -247,31 +247,7 @@ internal class HttpController(
         url: String,
         headers: Map<String, String> = emptyMap()
     ): String = withContext(Dispatchers.IO) {
-        val preparedUrl = prepareUrl(url)
-        val httpUrl = preparedUrl.toHttpUrlOrNull()
-            ?: throw IOException("Invalid URL: $url")
-
-        val requestBuilder = Request.Builder()
-            .url(preparedUrl)
-            .header("User-Agent", DEFAULT_USER_AGENT)
-            .header("Accept-Language", DEFAULT_ACCEPT_LANGUAGE)
-
-        // Add origin header
-        requestBuilder.header("Origin", "${httpUrl.scheme}://${httpUrl.host}")
-
-        // Add cookies
-        buildCookieHeader(httpUrl.host)?.let {
-            requestBuilder.header("Cookie", it)
-        }
-
-        // Add auth header if available
-        tryGenerateAuthHeader(preparedUrl)?.let {
-            requestBuilder.header("Authorization", it)
-        }
-
-        // Add custom headers
-        headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-
+        val (preparedUrl, requestBuilder) = newStandardRequest(url, headers)
         val request = requestBuilder.get().build()
         executeRequest(request, preparedUrl)
     }
@@ -292,36 +268,42 @@ internal class HttpController(
         json: String,
         headers: Map<String, String> = emptyMap()
     ): String = withContext(Dispatchers.IO) {
+        val (preparedUrl, requestBuilder) = newStandardRequest(url, headers)
+        requestBuilder.header("Content-Type", "application/json")
+        val body = json.toRequestBody(JSON_MEDIA_TYPE)
+        val request = requestBuilder.post(body).build()
+        executeRequest(request, preparedUrl)
+    }
+
+    /**
+     * Builds a [Request.Builder] preconfigured with the standard YouTube header pipeline:
+     * User-Agent, Accept-Language, Origin, cookies for the host, and SAPISIDHASH
+     * Authorization (when we have the SAPISID cookie).
+     *
+     * Used by all GET-family methods (`get`, `getStream`, `getContentLength`) and `postJson`
+     * so authenticated requests are consistent across the entire pipeline. Without this
+     * shared path, observers of network traffic could distinguish authenticated vs.
+     * unauthenticated callers based on which method was called.
+     */
+    private fun newStandardRequest(
+        url: String,
+        extraHeaders: Map<String, String> = emptyMap()
+    ): Pair<String, Request.Builder> {
         val preparedUrl = prepareUrl(url)
         val httpUrl = preparedUrl.toHttpUrlOrNull()
             ?: throw IOException("Invalid URL: $url")
 
-        val body = json.toRequestBody(JSON_MEDIA_TYPE)
-
-        val requestBuilder = Request.Builder()
+        val builder = Request.Builder()
             .url(preparedUrl)
             .header("User-Agent", DEFAULT_USER_AGENT)
             .header("Accept-Language", DEFAULT_ACCEPT_LANGUAGE)
-            .header("Content-Type", "application/json")
+            .header("Origin", "${httpUrl.scheme}://${httpUrl.host}")
 
-        // Add origin header
-        requestBuilder.header("Origin", "${httpUrl.scheme}://${httpUrl.host}")
+        buildCookieHeader(httpUrl.host)?.let { builder.header("Cookie", it) }
+        tryGenerateAuthHeader(preparedUrl)?.let { builder.header("Authorization", it) }
+        extraHeaders.forEach { (k, v) -> builder.header(k, v) }
 
-        // Add cookies
-        buildCookieHeader(httpUrl.host)?.let {
-            requestBuilder.header("Cookie", it)
-        }
-
-        // Add auth header if available
-        tryGenerateAuthHeader(preparedUrl)?.let {
-            requestBuilder.header("Authorization", it)
-        }
-
-        // Add custom headers
-        headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-
-        val request = requestBuilder.post(body).build()
-        executeRequest(request, preparedUrl)
+        return preparedUrl to builder
     }
 
     /**
@@ -401,15 +383,8 @@ internal class HttpController(
         url: String,
         headers: Map<String, String> = emptyMap()
     ): java.io.InputStream = withContext(Dispatchers.IO) {
-        val request = Request.Builder()
-            .url(url)
-            .header("User-Agent", DEFAULT_USER_AGENT)
-            .header("Accept-Language", DEFAULT_ACCEPT_LANGUAGE)
-            .apply {
-                headers.forEach { (key, value) -> header(key, value) }
-            }
-            .get()
-            .build()
+        val (_, builder) = newStandardRequest(url, headers)
+        val request = builder.get().build()
 
         val response = client.newCall(request).execute()
 
@@ -436,11 +411,8 @@ internal class HttpController(
      * @return The content length in bytes, or null if not available
      */
     suspend fun getContentLength(url: String): Long? = withContext(Dispatchers.IO) {
-        val request = Request.Builder()
-            .url(url)
-            .header("User-Agent", DEFAULT_USER_AGENT)
-            .head()
-            .build()
+        val (_, builder) = newStandardRequest(url)
+        val request = builder.head().build()
 
         val response = client.newCall(request).execute()
         response.use {

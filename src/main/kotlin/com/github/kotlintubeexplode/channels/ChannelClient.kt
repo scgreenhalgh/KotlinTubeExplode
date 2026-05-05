@@ -209,10 +209,20 @@ class ChannelClient internal constructor(
         return null
     }
 
-    private fun extractLogoSize(logoUrl: String): Int {
-        LOGO_SIZE_PATTERN.find(logoUrl)?.groupValues?.get(1)?.toIntOrNull()?.let {
-            return it
-        }
-        return 88 // Default avatar size
-    }
+    private fun extractLogoSize(logoUrl: String): Int = parseLogoSize(logoUrl)
+}
+
+/**
+ * Parses the avatar size out of a YouTube channel logo URL.
+ *
+ * Channel logo URLs commonly contain multiple `\bs(\d+)\b` tokens — typically a
+ * crop coordinate followed by the actual size. Upstream picks the LAST match
+ * (the size). Default of 100 matches upstream's `Thumbnail.GetDefaultSet`.
+ */
+internal fun parseLogoSize(logoUrl: String): Int {
+    val pattern = Regex("""\bs(\d+)\b""")
+    return pattern.findAll(logoUrl).lastOrNull()
+        ?.groupValues?.get(1)
+        ?.toIntOrNull()
+        ?: 100
 }

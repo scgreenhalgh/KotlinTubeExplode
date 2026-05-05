@@ -4,9 +4,11 @@ import com.github.kotlintubeexplode.videos.streams.Container
 import com.github.kotlintubeexplode.videos.streams.VideoQuality
 import com.github.kotlintubeexplode.videos.streams.AudioOnlyStreamInfo
 import com.github.kotlintubeexplode.videos.streams.VideoOnlyStreamInfo
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.Test
+import org.xml.sax.SAXParseException
 
 class DashManifestParserTest {
 
@@ -74,5 +76,18 @@ class DashManifestParserTest {
 
         val streams = parser.parse(manifestXml)
         streams shouldHaveSize 0
+    }
+
+    @Test
+    fun `should propagate parser exception on malformed XML`() {
+        // Drift #29: parse() previously swallowed all exceptions and returned empty list,
+        // hiding parser regressions. Match upstream behavior — propagate.
+        // Asserting SAXParseException specifically (rather than `Exception`) so an unrelated
+        // failure mode (e.g., NPE) doesn't silently satisfy the assertion.
+        val malformed = "<MPD><not really xml >"
+
+        shouldThrow<SAXParseException> {
+            parser.parse(malformed)
+        }
     }
 }

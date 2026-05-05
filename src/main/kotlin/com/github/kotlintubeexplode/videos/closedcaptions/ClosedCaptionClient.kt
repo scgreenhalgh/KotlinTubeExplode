@@ -5,6 +5,8 @@ import com.github.kotlintubeexplode.core.VideoId
 import com.github.kotlintubeexplode.internal.HttpController
 import com.github.kotlintubeexplode.internal.VideoController
 import com.github.kotlintubeexplode.internal.dto.ClosedCaptionTrackResponseDto
+import com.github.kotlintubeexplode.internal.setQueryParameter
+import com.github.kotlintubeexplode.internal.toSafeFilePath
 import java.io.File
 import java.io.Writer
 import kotlin.time.Duration
@@ -60,17 +62,11 @@ class ClosedCaptionClient internal constructor(
      * @return The closed caption track containing all captions
      */
     suspend fun get(trackInfo: ClosedCaptionTrackInfo): ClosedCaptionTrack {
-        // Enforce format=3 (XML format with word-level timing)
-        val url = buildString {
-            append(trackInfo.url)
-            if (!trackInfo.url.contains("format=")) {
-                append(if (trackInfo.url.contains("?")) "&" else "?")
-                append("format=3")
-            }
-            if (!trackInfo.url.contains("fmt=")) {
-                append("&fmt=3")
-            }
-        }
+        // Force fmt=3 / format=3 (XML with word-level timing). YouTube sometimes returns
+        // track URLs with these params already set to other values (e.g. fmt=1 = vtt), in
+        // which case our XML parser would silently return zero captions. Override rather
+        // than append-if-absent. Matches upstream's SetQueryParameter behavior.
+        val url = trackInfo.url.setQueryParameter("format", "3").setQueryParameter("fmt", "3")
 
         val xml = httpController.get(url)
         val response = ClosedCaptionTrackResponseDto.parse(xml)
@@ -137,7 +133,9 @@ class ClosedCaptionClient internal constructor(
         filePath: String,
         onProgress: ((Double) -> Unit)? = null
     ) {
-        val file = File(filePath)
+        // Sanitize basename only (preserves caller-controlled directory). Defends against
+        // user-derived filename patterns where caption titles may contain unsafe chars.
+        val file = toSafeFilePath(filePath)
 
         if (file.exists() && file.isDirectory) {
             throw IllegalArgumentException("Path is a directory: $filePath")

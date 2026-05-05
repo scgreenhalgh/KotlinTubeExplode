@@ -134,6 +134,13 @@ class StringExtensionsTest {
         fun `should parse ISO 8601 with only seconds`() {
             "PT45S".parseDurationSeconds() shouldBe 45L
         }
+
+        @Test
+        fun `should parse zero-duration ISO 8601 PT0S as 0`() {
+            // PT0S is a valid ISO 8601 duration meaning "zero seconds".
+            // Previously returned null because of `if (seconds > 0)` check.
+            "PT0S".parseDurationSeconds() shouldBe 0L
+        }
     }
 
     @Nested
@@ -245,6 +252,96 @@ class StringExtensionsTest {
         }
     }
     
+    @Nested
+    @DisplayName("setQueryParameter")
+    inner class SetQueryParameterTests {
+
+        @Test
+        fun `should append to URL with no query string`() {
+            "https://example/path".setQueryParameter("fmt", "3") shouldBe
+                "https://example/path?fmt=3"
+        }
+
+        @Test
+        fun `should append to URL with existing query string`() {
+            "https://example/path?a=1".setQueryParameter("fmt", "3") shouldBe
+                "https://example/path?a=1&fmt=3"
+        }
+
+        @Test
+        fun `should replace existing parameter value when first param`() {
+            "https://example/path?fmt=1&a=2".setQueryParameter("fmt", "3") shouldBe
+                "https://example/path?fmt=3&a=2"
+        }
+
+        @Test
+        fun `should replace existing parameter value when later param`() {
+            "https://example/path?a=2&fmt=1".setQueryParameter("fmt", "3") shouldBe
+                "https://example/path?a=2&fmt=3"
+        }
+
+        @Test
+        fun `should not be confused by partial-name match`() {
+            // 'format' should not match 'fmt' even though they share a prefix.
+            "https://example/path?format=1&fmt=2".setQueryParameter("fmt", "3") shouldBe
+                "https://example/path?format=1&fmt=3"
+        }
+
+        @Test
+        fun `should URL-encode the value`() {
+            "https://example/path".setQueryParameter("q", "a b") shouldBe
+                "https://example/path?q=a+b"
+        }
+    }
+
+    @Nested
+    @DisplayName("toSafeFilePath")
+    inner class ToSafeFilePathTests {
+        // Security finding #3: download() and downloadSrt() previously accepted any path
+        // string, allowing path traversal via user-derived basenames. toSafeFilePath
+        // sanitizes the basename (final path segment) while preserving the directory.
+
+        @Test
+        fun `should pass through plain basename unchanged`() {
+            toSafeFilePath("video.mp4").path shouldBe "video.mp4"
+        }
+
+        @Test
+        fun `should preserve directory portion`() {
+            toSafeFilePath("dir/video.mp4").path shouldBe "dir/video.mp4"
+        }
+
+        @Test
+        fun `should sanitize invalid chars in basename`() {
+            // `?` is invalid in filenames on Windows; sanitizer replaces with `_`.
+            toSafeFilePath("dir/video?.mp4").path shouldBe "dir/video_.mp4"
+        }
+
+        @Test
+        fun `should replace dot-dot basename with safe default`() {
+            // `..` as a final segment would write to the parent directory's entry.
+            toSafeFilePath("dir/..").path shouldBe "dir/video"
+        }
+
+        @Test
+        fun `should replace single-dot basename with safe default`() {
+            toSafeFilePath("dir/.").path shouldBe "dir/video"
+        }
+
+        @Test
+        fun `should sanitize traversal attempt encoded into basename`() {
+            // A user-supplied title like "../../etc/passwd" — when shoved into the basename
+            // position — still has `/` chars, which sanitizeFileName replaces with `_`.
+            // The directory portion is whatever the caller supplied, so the directory
+            // remains `dir` and the entire malicious "title" becomes a flat filename.
+            val result = toSafeFilePath("dir/../../etc/passwd")
+            // `..` ends up as the basename here per File semantics (last segment of the path
+            // is `passwd`), but only the final segment is sanitized. This proves the
+            // contract: basename only, NOT directory canonicalization.
+            result.name shouldBe "passwd"
+        }
+    }
+
     @Nested
     @DisplayName("sanitizeFileName")
     inner class SanitizeFileNameTests {

@@ -3,6 +3,7 @@ package com.github.kotlintubeexplode.videos.streams
 import com.github.kotlintubeexplode.common.Language
 import com.github.kotlintubeexplode.core.VideoId
 import com.github.kotlintubeexplode.exceptions.VideoUnavailableException
+import com.github.kotlintubeexplode.exceptions.VideoUnplayableException
 import com.github.kotlintubeexplode.internal.*
 import com.github.kotlintubeexplode.internal.cipher.CipherManifest
 import com.github.kotlintubeexplode.internal.cipher.PlayerScriptParser
@@ -10,6 +11,9 @@ import com.github.kotlintubeexplode.internal.dto.PlayerResponseDto
 import com.github.kotlintubeexplode.internal.dto.StreamFormatDto
 import com.github.kotlintubeexplode.internal.dto.StreamingDataDto
 import com.github.kotlintubeexplode.common.Resolution
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.io.InputStream
 import java.io.OutputStream
 
@@ -78,7 +82,10 @@ class StreamClient internal constructor(
         val playerResponse = pageParser.parseWatchPage(html)
 
         return playerResponse.streamingData?.hlsManifestUrl
-            ?: throw IllegalStateException("HLS manifest URL not available for video ${videoId.value}")
+            ?: throw VideoUnplayableException(
+                "HLS manifest URL not available for video '${videoId.value}': " +
+                    (playerResponse.playabilityStatus?.reason ?: "unplayable")
+            )
     }
 
     /**
@@ -160,11 +167,11 @@ class StreamClient internal constructor(
         filePath: String,
         onProgress: ((Double) -> Unit)? = null
     ) {
-        val file = java.io.File(filePath)
+        // Sanitize basename only (preserves caller-controlled directory). Defends against
+        // common consumer pattern `download(stream, "$baseDir/$videoTitle.mp4")` where the
+        // title is derived from YouTube metadata and may contain `/`, `..`, `:`, etc.
+        val file = toSafeFilePath(filePath)
 
-        // Security check: Ensure we are not writing to a directory
-        // Note: Full path traversal prevention is the caller's responsibility
-        // as we accept absolute paths here.
         if (file.exists() && file.isDirectory) {
             throw IllegalArgumentException("Path is a directory: $filePath")
         }
@@ -241,16 +248,15 @@ class StreamClient internal constructor(
         val streamingData = response.streamingData ?: return emptyList()
         val streams = mutableListOf<IStreamInfo>()
 
-        // Process formats - Android client typically returns plain URLs
-        for (format in streamingData.allFormats) {
-            // Skip formats that require decryption (shouldn't happen with Android client)
-            if (format.url == null) continue
-
-            val streamInfo = processFormatWithoutCipher(format)
-            if (streamInfo != null) {
-                streams.add(streamInfo)
-            }
+        // Process formats in parallel — each format may issue HEAD + range-fetch verifications
+        // (verifyStreamUrl), so serial processing makes manifest fetch O(n) HTTP round trips.
+        val processedFormats = coroutineScope {
+            streamingData.allFormats
+                .filter { it.url != null }
+                .map { format -> async { processFormatWithoutCipher(format) } }
+                .awaitAll()
         }
+        streams.addAll(processedFormats.filterNotNull())
 
         // Also try DASH manifest if available
         streamingData.dashManifestUrl?.let { dashUrl ->
@@ -287,13 +293,14 @@ class StreamClient internal constructor(
             val streamingData = response.streamingData ?: return emptyList()
             val streams = mutableListOf<IStreamInfo>()
 
-            // TV Embedded returns ciphered streams, so we need to decrypt
-            for (format in streamingData.allFormats) {
-                val streamInfo = processFormat(format, cipherManifest) { cipherManifest }
-                if (streamInfo != null) {
-                    streams.add(streamInfo)
-                }
+            // TV Embedded returns ciphered streams. Process in parallel — see Android-client
+            // comment above for rationale.
+            val processedFormats = coroutineScope {
+                streamingData.allFormats
+                    .map { format -> async { processFormat(format, cipherManifest) { cipherManifest } } }
+                    .awaitAll()
             }
+            streams.addAll(processedFormats.filterNotNull())
 
             // Also try DASH manifest
             streamingData.dashManifestUrl?.let { dashUrl ->
@@ -337,19 +344,28 @@ class StreamClient internal constructor(
 
         // Process streaming data
         playerResponse.streamingData?.let { streamingData ->
-            // Process all formats
-            for (format in streamingData.allFormats) {
-                val streamInfo = processFormat(format, cipherManifest) {
-                    // Lazy load cipher manifest only when needed
-                    if (cipherManifest == null) {
-                        cipherManifest = videoController.getCipherManifest()
-                    }
-                    cipherManifest!!
-                }
-                if (streamInfo != null) {
-                    streams.add(streamInfo)
-                }
+            // Pre-resolve cipher manifest once if any format will need decryption — avoids the
+            // race that would otherwise occur if multiple parallel formats hit the lazy
+            // initializer below simultaneously.
+            if (streamingData.allFormats.any { it.requiresDecryption }) {
+                cipherManifest = videoController.getCipherManifest()
             }
+
+            // Process formats in parallel — each may issue HEAD + range-fetch verifications.
+            val resolvedCipher = cipherManifest
+            val processedFormats = coroutineScope {
+                streamingData.allFormats
+                    .map { format ->
+                        async {
+                            processFormat(format, resolvedCipher) {
+                                resolvedCipher
+                                    ?: videoController.getCipherManifest().also { cipherManifest = it }
+                            }
+                        }
+                    }
+                    .awaitAll()
+            }
+            streams.addAll(processedFormats.filterNotNull())
 
             // Try to get DASH manifest streams
             streamingData.dashManifestUrl?.let { dashUrl ->
@@ -370,13 +386,16 @@ class StreamClient internal constructor(
      * Process a format that already has a plain URL (no cipher needed).
      * Used for Android client responses.
      */
-    private fun processFormatWithoutCipher(format: StreamFormatDto): IStreamInfo? {
+    private suspend fun processFormatWithoutCipher(format: StreamFormatDto): IStreamInfo? {
         val itag = format.itag ?: return null
         val streamUrl = format.url ?: return null
 
         // Parse stream properties
         val container = format.container?.let { Container(it) } ?: Container.Mp4
-        val contentLength = format.contentLengthLong ?: 0L
+        // Verify the URL is fetchable and resolve the actual content length per upstream (drift #33).
+        // Drops streams with stale/expired URLs or mismatched length metadata.
+        val contentLength = verifyStreamUrl(httpController, streamUrl, format.contentLengthLong)
+            ?: return null
         val bitrate = format.bitrate ?: 0L
 
         val videoCodec = format.videoCodec
@@ -421,7 +440,8 @@ class StreamClient internal constructor(
                     bitrate = Bitrate(bitrate),
                     videoCodec = videoCodec ?: "unknown",
                     videoQuality = quality,
-                    videoResolution = Resolution(width, height)
+                    videoResolution = Resolution(width, height),
+                    isVideoUpscaled = format.isVideoUpscaled
                 )
             }
 
@@ -447,7 +467,8 @@ class StreamClient internal constructor(
                     isAudioLanguageDefault = format.isDefaultAudioTrack.takeIf { it },
                     videoCodec = videoCodec,
                     videoQuality = quality,
-                    videoResolution = Resolution(width, height)
+                    videoResolution = Resolution(width, height),
+                    isVideoUpscaled = format.isVideoUpscaled
                 )
             }
 
@@ -486,7 +507,10 @@ class StreamClient internal constructor(
 
         // Parse stream properties
         val container = format.container?.let { Container(it) } ?: Container.Mp4
-        val contentLength = format.contentLengthLong ?: 0L
+        // Verify the URL is fetchable and resolve the actual content length per upstream (drift #33).
+        // Drops streams with stale/expired URLs or mismatched length metadata.
+        val contentLength = verifyStreamUrl(httpController, streamUrl, format.contentLengthLong)
+            ?: return null
         val bitrate = format.bitrate ?: 0L
 
         val videoCodec = format.videoCodec
@@ -531,7 +555,8 @@ class StreamClient internal constructor(
                     bitrate = Bitrate(bitrate),
                     videoCodec = videoCodec ?: "unknown",
                     videoQuality = quality,
-                    videoResolution = Resolution(width, height)
+                    videoResolution = Resolution(width, height),
+                    isVideoUpscaled = format.isVideoUpscaled
                 )
             }
 
@@ -557,7 +582,8 @@ class StreamClient internal constructor(
                     isAudioLanguageDefault = format.isDefaultAudioTrack.takeIf { it },
                     videoCodec = videoCodec,
                     videoQuality = quality,
-                    videoResolution = Resolution(width, height)
+                    videoResolution = Resolution(width, height),
+                    isVideoUpscaled = format.isVideoUpscaled
                 )
             }
 
@@ -565,21 +591,4 @@ class StreamClient internal constructor(
         }
     }
 
-    private fun String.parseQueryParameters(): Map<String, String> {
-        return split("&").mapNotNull { param ->
-            val parts = param.split("=", limit = 2)
-            if (parts.size == 2) {
-                java.net.URLDecoder.decode(parts[0], "UTF-8") to
-                    java.net.URLDecoder.decode(parts[1], "UTF-8")
-            } else null
-        }.toMap()
-    }
-
-    private fun String.setQueryParameter(name: String, value: String): String {
-        val hasQuery = contains("?")
-        val separator = if (hasQuery) "&" else "?"
-        val encodedName = java.net.URLEncoder.encode(name, "UTF-8")
-        val encodedValue = java.net.URLEncoder.encode(value, "UTF-8")
-        return "$this$separator$encodedName=$encodedValue"
-    }
 }

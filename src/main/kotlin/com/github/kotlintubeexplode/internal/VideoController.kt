@@ -135,7 +135,7 @@ internal class VideoController(
         val playerResponse = pageParser.parseWatchPage(html)
 
         // Step 4: Validate video availability
-        validatePlayability(videoId, playerResponse)
+        validateAvailability(videoId, playerResponse)
 
         // Step 5: Build domain model
         return buildVideo(videoId, playerResponse)
@@ -320,13 +320,17 @@ internal class VideoController(
     }
 
     /**
-     * Validates that the video is playable.
+     * Validates that the video is available for metadata extraction.
+     *
+     * Upstream's `IsAvailable` gates metadata: `status != "error" && videoDetails != null`.
+     * A video can be metadata-available (LOGIN_REQUIRED, CONTENT_CHECK_REQUIRED,
+     * AGE_VERIFICATION_REQUIRED, etc. — videos in these states still expose title /
+     * author / thumbnails) but stream-unplayable. Stream extraction has its own
+     * `isPlayable` gate in StreamClient.
      */
-    private fun validatePlayability(videoId: VideoId, response: PlayerResponseDto) {
-        val status = response.playabilityStatus
-
-        if (status == null || !status.isPlayable) {
-            val reason = status?.reason ?: "Unknown error"
+    private fun validateAvailability(videoId: VideoId, response: PlayerResponseDto) {
+        if (!response.isAvailable) {
+            val reason = response.playabilityStatus?.reason ?: "Unknown error"
             throw VideoUnavailableException("Video '${videoId.value}' is unavailable: $reason")
         }
     }

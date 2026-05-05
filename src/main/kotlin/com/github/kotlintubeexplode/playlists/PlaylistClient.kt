@@ -1,11 +1,13 @@
 package com.github.kotlintubeexplode.playlists
 
-import com.github.kotlintubeexplode.common.Batch
-import com.github.kotlintubeexplode.core.VideoId
-import com.github.kotlintubeexplode.internal.HttpController
-import com.github.kotlintubeexplode.internal.VideoPageParser
 import com.github.kotlintubeexplode.common.Author
+import com.github.kotlintubeexplode.common.Batch
 import com.github.kotlintubeexplode.common.Thumbnail
+import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.KotlinTubeExplodeException
+import com.github.kotlintubeexplode.exceptions.PlaylistUnavailableException
+import com.github.kotlintubeexplode.internal.HttpController
+import com.github.kotlintubeexplode.internal.PlaylistController
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.*
@@ -15,7 +17,8 @@ import kotlin.time.Duration.Companion.seconds
  * Client for retrieving YouTube playlist information.
  */
 class PlaylistClient internal constructor(
-    private val httpController: HttpController
+    private val httpController: HttpController,
+    private val playlistController: PlaylistController = PlaylistController(httpController)
 ) {
     companion object {
         private const val BROWSE_URL = "https://www.youtube.com/youtubei/v1/browse"
@@ -59,31 +62,87 @@ class PlaylistClient internal constructor(
     }
 
     /**
-     * Gets videos in a playlist in batches.
+     * Gets videos in a playlist in batches via the `youtubei/v1/next` endpoint.
+     *
+     * Supports all playlist types including Mix (`RD…`) and system playlists.
+     * Mirrors upstream YoutubeExplode's pagination model: each iteration carries
+     * the last seen video ID + index + visitorData forward into the next request.
+     *
+     * Stops cleanly if the playlist becomes unavailable mid-iteration after at
+     * least one batch was emitted (upstream PR #922).
      *
      * @param playlistId The playlist ID
      * @return Flow of video batches
      */
     fun getVideoBatches(playlistId: PlaylistId): Flow<Batch<PlaylistVideo>> = flow {
         val seenIds = mutableSetOf<String>()
-        var continuation: String? = null
+        var lastVideoId: String? = null
+        var lastVideoIndex = 0
+        var visitorData: String? = null
+        var hasEmittedBatch = false
 
-        // Initial fetch
-        val initialResponse = fetchPlaylistBrowse(playlistId)
-        val initialVideos = extractVideos(initialResponse, playlistId, seenIds)
-        if (initialVideos.isNotEmpty()) {
-            emit(Batch(initialVideos))
-        }
-        continuation = extractContinuation(initialResponse)
-
-        // Paginate
-        while (continuation != null) {
-            val nextResponse = fetchPlaylistContinuation(continuation)
-            val videos = extractVideos(nextResponse, playlistId, seenIds)
-            if (videos.isNotEmpty()) {
-                emit(Batch(videos))
+        while (true) {
+            val response = try {
+                playlistController.getPlaylistNextResponse(
+                    playlistId = playlistId,
+                    videoId = lastVideoId,
+                    index = lastVideoIndex,
+                    visitorData = visitorData
+                )
+            } catch (e: PlaylistUnavailableException) {
+                // Mid-iteration unavailability after we've already streamed some videos —
+                // treat as end of playlist instead of bubbling up the exception.
+                if (hasEmittedBatch) break
+                throw e
             }
-            continuation = extractContinuation(nextResponse)
+
+            val cursorBefore = lastVideoId
+            val newVideos = mutableListOf<PlaylistVideo>()
+            for (videoData in response.videos) {
+                val videoId = videoData.videoId
+                    ?: throw KotlinTubeExplodeException("Failed to extract the video ID.")
+                lastVideoId = videoId
+
+                val idx = videoData.index
+                    ?: throw KotlinTubeExplodeException("Failed to extract the video index.")
+                lastVideoIndex = idx
+
+                // Skip duplicates, but cursor still advances above.
+                if (!seenIds.add(videoId)) continue
+
+                // Skip entries where author info is unrecoverable (multi-author videos with
+                // dialog-panel author renderers, deleted/private videos with no byline, etc.).
+                // Upstream throws here, but YouTube's multi-author dialog shape has shifted
+                // and chasing the deep fallback path is fragile; permissive skip is more robust.
+                val authorName = videoData.authorName ?: continue
+                val authorChannelId = videoData.authorChannelId ?: continue
+
+                val thumbnails = videoData.thumbnail?.thumbnails?.mapNotNull { thumb ->
+                    val url = thumb.url ?: return@mapNotNull null
+                    Thumbnail(url, thumb.width ?: 0, thumb.height ?: 0)
+                } ?: emptyList()
+
+                newVideos += PlaylistVideo(
+                    playlistId = playlistId,
+                    id = VideoId(videoId),
+                    title = videoData.titleText ?: "",
+                    author = Author(authorChannelId, authorName),
+                    duration = videoData.durationSeconds?.seconds,
+                    thumbnails = thumbnails,
+                    index = idx
+                )
+            }
+
+            // Stop only when the cursor didn't advance — i.e., the response itself had no new
+            // entries. A batch where all entries were skipped (deleted videos, multi-author
+            // dialog renderers we can't parse) still moved the cursor; keep iterating.
+            if (lastVideoId == cursorBefore) break
+
+            if (visitorData == null) visitorData = response.visitorData
+            if (newVideos.isNotEmpty()) {
+                emit(Batch(newVideos))
+                hasEmittedBatch = true
+            }
         }
     }
 
@@ -108,16 +167,6 @@ class PlaylistClient internal constructor(
     private suspend fun fetchPlaylistBrowse(playlistId: PlaylistId): JsonObject {
         val body = buildJsonObject {
             put("browseId", "VL${playlistId.value}")
-            put("context", buildClientContext())
-        }
-
-        val responseText = httpController.postJson(BROWSE_URL, body.toString())
-        return json.parseToJsonElement(responseText).jsonObject
-    }
-
-    private suspend fun fetchPlaylistContinuation(continuation: String): JsonObject {
-        val body = buildJsonObject {
-            put("continuation", continuation)
             put("context", buildClientContext())
         }
 
@@ -180,74 +229,6 @@ class PlaylistClient internal constructor(
         }
     }
 
-    private fun extractVideos(
-        response: JsonObject,
-        playlistId: PlaylistId,
-        seenIds: MutableSet<String>
-    ): List<PlaylistVideo> {
-        val videos = mutableListOf<PlaylistVideo>()
-
-        // Find video renderers in various locations
-        response.findAllByKey("playlistVideoRenderer").forEach { renderer ->
-            val videoId = renderer.findString("videoId") ?: return@forEach
-            if (!seenIds.add(videoId)) return@forEach // Skip duplicates
-
-            val title = renderer.findString("title", "runs", "0", "text")
-                ?: renderer.findString("title", "simpleText")
-                ?: "Untitled"
-
-            val authorName = renderer.findString("shortBylineText", "runs", "0", "text") ?: "Unknown"
-            val authorId = renderer.findString(
-                "shortBylineText", "runs", "0", "navigationEndpoint", "browseEndpoint", "browseId"
-            ) ?: ""
-
-            val durationSeconds = renderer.findString("lengthSeconds")?.toLongOrNull()
-                ?: parseDurationText(renderer.findString("lengthText", "simpleText"))
-
-            val thumbnails = renderer.findArray("thumbnail", "thumbnails")?.mapNotNull { thumb ->
-                val obj = thumb.jsonObject
-                val url = obj["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-                val width = obj["width"]?.jsonPrimitive?.intOrNull ?: 0
-                val height = obj["height"]?.jsonPrimitive?.intOrNull ?: 0
-                Thumbnail(url, width, height)
-            } ?: emptyList()
-
-            val index = renderer.findString("index", "simpleText")?.toIntOrNull()
-
-            videos.add(
-                PlaylistVideo(
-                    playlistId = playlistId,
-                    id = VideoId(videoId),
-                    title = title,
-                    author = Author(authorId, authorName),
-                    duration = durationSeconds?.seconds,
-                    thumbnails = thumbnails,
-                    index = index
-                )
-            )
-        }
-
-        return videos
-    }
-
-    private fun extractContinuation(response: JsonObject): String? {
-        return response.findAllByKey("continuationCommand").firstOrNull()
-            ?.findString("token")
-            ?: response.findAllByKey("continuationEndpoint").firstOrNull()
-                ?.findString("continuationCommand", "token")
-    }
-
-    private fun parseDurationText(text: String?): Long? {
-        if (text == null) return null
-        val parts = text.split(":").mapNotNull { it.toLongOrNull() }
-        return when (parts.size) {
-            3 -> parts[0] * 3600 + parts[1] * 60 + parts[2]
-            2 -> parts[0] * 60 + parts[1]
-            1 -> parts[0]
-            else -> null
-        }
-    }
-
     // JSON navigation helpers
     private fun JsonObject.findString(vararg path: String): String? {
         var current: JsonElement? = this
@@ -283,26 +264,4 @@ class PlaylistClient internal constructor(
 
     private fun JsonElement.findArray(vararg path: String): JsonArray? =
         (this as? JsonObject)?.findArray(*path)
-
-    private fun JsonObject.findAllByKey(key: String): List<JsonObject> {
-        val results = mutableListOf<JsonObject>()
-        findAllByKeyRecursive(this, key, results)
-        return results
-    }
-
-    private fun findAllByKeyRecursive(element: JsonElement, key: String, results: MutableList<JsonObject>) {
-        when (element) {
-            is JsonObject -> {
-                element[key]?.let { value ->
-                    if (value is JsonObject) results.add(value)
-                    else if (value is JsonArray) {
-                        value.filterIsInstance<JsonObject>().forEach { results.add(it) }
-                    }
-                }
-                element.values.forEach { findAllByKeyRecursive(it, key, results) }
-            }
-            is JsonArray -> element.forEach { findAllByKeyRecursive(it, key, results) }
-            else -> {}
-        }
-    }
 }

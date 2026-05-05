@@ -24,42 +24,38 @@ internal class DashManifestParser {
     fun parse(manifestXml: String): List<IStreamInfo> {
         val streams = mutableListOf<IStreamInfo>()
 
-        try {
-            val factory = DocumentBuilderFactory.newInstance().apply {
-                // Prevent XXE (XML External Entity) attacks
-                setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-                setFeature("http://xml.org/sax/features/external-general-entities", false)
-                setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-                setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
-                setXIncludeAware(false)
-                setExpandEntityReferences(false)
+        val factory = DocumentBuilderFactory.newInstance().apply {
+            // Prevent XXE (XML External Entity) attacks
+            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+            setFeature("http://xml.org/sax/features/external-general-entities", false)
+            setFeature("http://xml.org/sax/features/external-parameter-entities", false)
+            setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
+            setXIncludeAware(false)
+            setExpandEntityReferences(false)
+        }
+        val builder = factory.newDocumentBuilder()
+        val document = builder.parse(manifestXml.byteInputStream())
+
+        val representations = document.getElementsByTagName("Representation")
+        for (i in 0 until representations.length) {
+            val element = representations.item(i) as? Element ?: continue
+
+            // Skip non-numeric IDs (like "rawcc" for closed captions)
+            val id = element.getAttribute("id")
+            if (!id.all { it.isDigit() }) continue
+
+            // Skip segmented streams
+            val initUrl = element.getElementsByTagName("Initialization")
+                .item(0)?.let { (it as? Element)?.getAttribute("sourceURL") }
+            if (initUrl?.contains("sq/") == true) continue
+
+            // Skip streams without codecs
+            val codecs = element.getAttribute("codecs").takeIf { it.isNotBlank() } ?: continue
+
+            val streamInfo = parseRepresentation(element, codecs)
+            if (streamInfo != null) {
+                streams.add(streamInfo)
             }
-            val builder = factory.newDocumentBuilder()
-            val document = builder.parse(manifestXml.byteInputStream())
-
-            val representations = document.getElementsByTagName("Representation")
-            for (i in 0 until representations.length) {
-                val element = representations.item(i) as? Element ?: continue
-
-                // Skip non-numeric IDs (like "rawcc" for closed captions)
-                val id = element.getAttribute("id")
-                if (!id.all { it.isDigit() }) continue
-
-                // Skip segmented streams
-                val initUrl = element.getElementsByTagName("Initialization")
-                    .item(0)?.let { (it as? Element)?.getAttribute("sourceURL") }
-                if (initUrl?.contains("sq/") == true) continue
-
-                // Skip streams without codecs
-                val codecs = element.getAttribute("codecs").takeIf { it.isNotBlank() } ?: continue
-
-                val streamInfo = parseRepresentation(element, codecs)
-                if (streamInfo != null) {
-                    streams.add(streamInfo)
-                }
-            }
-        } catch (e: Exception) {
-            // Return empty list on parse failure
         }
 
         return streams

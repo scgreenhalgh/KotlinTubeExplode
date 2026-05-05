@@ -24,90 +24,106 @@ data class PlaylistBrowseResponseDto(
 )
 
 /**
- * DTO for playlist continuation/next API response (pagination).
+ * DTO for the `youtubei/v1/next` API response, used for playlist video pagination.
+ *
+ * Path of interest:
+ *   contents.twoColumnWatchNextResults.playlist.playlist.contents[].playlistPanelVideoRenderer
+ *   responseContext.visitorData
  */
 @Serializable
 data class PlaylistNextResponseDto(
-    @SerialName("contents")
-    val contents: JsonObject? = null,
+    @SerialName("contents") val contents: NextContentsDto? = null,
+    @SerialName("responseContext") val responseContext: NextResponseContextDto? = null
+) {
+    val visitorData: String? get() = responseContext?.visitorData
 
-    @SerialName("currentVideoEndpoint")
-    val currentVideoEndpoint: JsonObject? = null,
+    private val playlistRoot: PlaylistPanelDto?
+        get() = contents?.twoColumnWatchNextResults?.playlist?.playlist
 
-    @SerialName("trackingParams")
-    val trackingParams: String? = null
+    val isAvailable: Boolean get() = playlistRoot != null
+
+    val title: String? get() = playlistRoot?.title
+
+    val authorName: String? get() = playlistRoot?.ownerName?.simpleText
+
+    val videos: List<PlaylistPanelVideoRendererDto>
+        get() = playlistRoot?.contents?.mapNotNull { it.playlistPanelVideoRenderer }
+            ?: emptyList()
+}
+
+@Serializable
+data class NextContentsDto(
+    @SerialName("twoColumnWatchNextResults")
+    val twoColumnWatchNextResults: TwoColumnWatchNextResultsDto? = null
+)
+
+@Serializable
+data class TwoColumnWatchNextResultsDto(
+    @SerialName("playlist") val playlist: NextPlaylistContainerDto? = null
+)
+
+@Serializable
+data class NextPlaylistContainerDto(
+    @SerialName("playlist") val playlist: PlaylistPanelDto? = null
+)
+
+@Serializable
+data class PlaylistPanelDto(
+    @SerialName("title") val title: String? = null,
+    @SerialName("ownerName") val ownerName: TextRunsDto? = null,
+    @SerialName("contents") val contents: List<PlaylistPanelEntryDto> = emptyList()
+)
+
+@Serializable
+data class PlaylistPanelEntryDto(
+    @SerialName("playlistPanelVideoRenderer")
+    val playlistPanelVideoRenderer: PlaylistPanelVideoRendererDto? = null
+)
+
+@Serializable
+data class NextResponseContextDto(
+    @SerialName("visitorData") val visitorData: String? = null
 )
 
 /**
- * DTO for a video within a playlist.
+ * Individual video within a Next-API playlist panel response.
+ * Distinct shape from browse-endpoint `playlistVideoRenderer`:
+ *   - index lives at `navigationEndpoint.watchEndpoint.index`, not as a top-level field
+ *   - prefers `longBylineText` over `shortBylineText` for author info
  */
 @Serializable
-data class PlaylistVideoDto(
-    @SerialName("videoId")
-    val videoId: String? = null,
-
-    @SerialName("title")
-    val title: TextRunsDto? = null,
-
-    @SerialName("index")
-    val index: TextRunsDto? = null,
-
-    @SerialName("shortBylineText")
-    val shortBylineText: TextRunsDto? = null,
-
-    @SerialName("lengthText")
-    val lengthText: TextRunsDto? = null,
-
-    @SerialName("lengthSeconds")
-    val lengthSeconds: String? = null,
-
-    @SerialName("thumbnail")
-    val thumbnail: ThumbnailContainerDto? = null,
-
-    @SerialName("navigationEndpoint")
-    val navigationEndpoint: JsonObject? = null,
-
-    @SerialName("isPlayable")
-    val isPlayable: Boolean? = null
+data class PlaylistPanelVideoRendererDto(
+    @SerialName("videoId") val videoId: String? = null,
+    @SerialName("title") val title: TextRunsDto? = null,
+    @SerialName("longBylineText") val longBylineText: TextRunsDto? = null,
+    @SerialName("shortBylineText") val shortBylineText: TextRunsDto? = null,
+    @SerialName("lengthSeconds") val lengthSeconds: String? = null,
+    @SerialName("lengthText") val lengthText: TextRunsDto? = null,
+    @SerialName("thumbnail") val thumbnail: ThumbnailContainerDto? = null,
+    @SerialName("navigationEndpoint") val navigationEndpoint: NavigationEndpointDto? = null
 ) {
-    /**
-     * Extracts the video title as a plain string.
-     */
-    val titleText: String?
-        get() = title?.simpleText ?: title?.runs?.firstOrNull()?.text
+    val titleText: String? get() = title?.text
 
-    /**
-     * Extracts the channel name.
-     */
-    val channelName: String?
-        get() = shortBylineText?.runs?.firstOrNull()?.text
+    private val authorRun: TextRunDto?
+        get() = longBylineText?.runs?.firstOrNull()
+            ?: shortBylineText?.runs?.firstOrNull()
 
-    /**
-     * Extracts the channel ID from navigation endpoint.
-     */
-    val channelId: String?
-        get() = shortBylineText?.runs?.firstOrNull()?.navigationEndpoint?.browseEndpoint?.browseId
+    val authorName: String? get() = authorRun?.text
 
-    /**
-     * Parses the duration in seconds.
-     */
+    val authorChannelId: String?
+        get() = authorRun?.navigationEndpoint?.browseEndpoint?.browseId
+
+    val index: Int? get() = navigationEndpoint?.watchEndpoint?.index
+
     val durationSeconds: Long?
         get() {
-            // Try lengthSeconds first
-            lengthSeconds?.toLongOrNull()?.let { return it }
-
-            // Parse from lengthText (format: "3:45" or "1:23:45")
-            val text = lengthText?.simpleText ?: lengthText?.runs?.firstOrNull()?.text ?: return null
+            // Match upstream's double.ParseOrNull tolerance for fractional seconds (e.g., "8.5").
+            // We truncate to Long since our public type is integer seconds; upstream uses TimeSpan
+            // which preserves fractional, but for video duration this loses sub-second precision
+            // that's not consumer-relevant.
+            lengthSeconds?.toDoubleOrNull()?.toLong()?.let { return it }
+            val text = lengthText?.text ?: return null
             return parseDuration(text)
-        }
-
-    /**
-     * Extracts the playlist index.
-     */
-    val indexValue: Int?
-        get() {
-            val text = index?.simpleText ?: index?.runs?.firstOrNull()?.text ?: return null
-            return text.filter { it.isDigit() }.toIntOrNull()
         }
 
     private fun parseDuration(text: String): Long? {

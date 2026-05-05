@@ -156,7 +156,9 @@ private fun String.parseIsoDuration(): Long? {
         }
     }
 
-    return if (seconds > 0) seconds else null
+    // The regex only matches non-negative digits, so seconds is always >= 0. Return as-is —
+    // PT0S is a valid zero-duration ISO 8601 value.
+    return seconds
 }
 
 /**
@@ -255,7 +257,31 @@ fun String.urlEncode(): String = try {
 fun String.sanitizeFileName(): String {
     val invalidChars = Regex("""[\\/:*?"<>|]""")
     val sanitized = replace(invalidChars, "_").trim()
-    return sanitized.ifBlank { "video" }
+    return when {
+        sanitized.isBlank() -> "video"
+        // Reject `.` and `..` as filenames — both are filesystem references that could
+        // surprise callers (write to current/parent directory entry).
+        sanitized == "." || sanitized == ".." -> "video"
+        else -> sanitized
+    }
+}
+
+/**
+ * Returns a safe `File` derived from the supplied path string.
+ *
+ * Sanitizes only the basename (final path segment), leaving the directory portion
+ * intact. Designed for the common consumer pattern
+ * `download(stream, "$baseDir/$videoTitle.mp4")` where `baseDir` is hardcoded but
+ * `videoTitle` is derived from user-controlled YouTube metadata that may contain
+ * `/`, `..`, `:`, etc.
+ *
+ * Note: does NOT validate the directory portion. Callers who accept user-supplied
+ * directories must canonicalize and check those separately.
+ */
+internal fun toSafeFilePath(filePath: String): java.io.File {
+    val original = java.io.File(filePath)
+    val cleanName = original.name.sanitizeFileName()
+    return original.parentFile?.let { java.io.File(it, cleanName) } ?: java.io.File(cleanName)
 }
 
 /**

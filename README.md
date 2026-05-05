@@ -14,7 +14,7 @@ No API key required. Works by reverse-engineering YouTube's internal endpoints.
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.github.kotlintubeexplode:kotlintubeexplode:1.0.0")
+    implementation("com.github.kotlintubeexplode:kotlintubeexplode:1.1.0")
 }
 ```
 
@@ -23,7 +23,7 @@ Maven:
 <dependency>
     <groupId>com.github.kotlintubeexplode</groupId>
     <artifactId>kotlintubeexplode</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
 </dependency>
 ```
 

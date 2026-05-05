@@ -11,6 +11,69 @@ import org.junit.jupiter.api.Test
 class StreamsTest {
 
     @Nested
+    @DisplayName("isVideoUpscaled")
+    inner class IsVideoUpscaledTests {
+
+        @Test
+        fun `VideoOnlyStreamInfo defaults isVideoUpscaled to false`() {
+            val stream = VideoOnlyStreamInfo(
+                url = "https://example/v",
+                container = Container.Mp4,
+                size = FileSize(1_000),
+                bitrate = Bitrate(500_000),
+                videoCodec = "avc1",
+                videoQuality = VideoQuality.fromItag(137),
+                videoResolution = Resolution(1920, 1080)
+            )
+            stream.isVideoUpscaled shouldBe false
+        }
+
+        @Test
+        fun `VideoOnlyStreamInfo exposes isVideoUpscaled when set`() {
+            val stream = VideoOnlyStreamInfo(
+                url = "https://example/v",
+                container = Container.Mp4,
+                size = FileSize(1_000),
+                bitrate = Bitrate(500_000),
+                videoCodec = "avc1",
+                videoQuality = VideoQuality.fromItag(137),
+                videoResolution = Resolution(1920, 1080),
+                isVideoUpscaled = true
+            )
+            stream.isVideoUpscaled shouldBe true
+        }
+
+        @Test
+        fun `MuxedStreamInfo defaults isVideoUpscaled to false`() {
+            val stream = MuxedStreamInfo(
+                url = "https://example/v",
+                container = Container.Mp4,
+                size = FileSize(1_000),
+                bitrate = Bitrate(500_000),
+                audioCodec = "mp4a",
+                videoCodec = "avc1",
+                videoQuality = VideoQuality.fromItag(22),
+                videoResolution = Resolution(1280, 720)
+            )
+            stream.isVideoUpscaled shouldBe false
+        }
+
+        @Test
+        fun `IVideoStreamInfo interface exposes isVideoUpscaled with default false`() {
+            val stream: IVideoStreamInfo = VideoOnlyStreamInfo(
+                url = "https://example/v",
+                container = Container.Mp4,
+                size = FileSize(1_000),
+                bitrate = Bitrate(500_000),
+                videoCodec = "avc1",
+                videoQuality = VideoQuality.fromItag(137),
+                videoResolution = Resolution(1920, 1080)
+            )
+            stream.isVideoUpscaled shouldBe false
+        }
+    }
+
+    @Nested
     @DisplayName("Container")
     inner class ContainerTests {
 

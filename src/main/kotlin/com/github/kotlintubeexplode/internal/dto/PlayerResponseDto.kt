@@ -1,5 +1,6 @@
 package com.github.kotlintubeexplode.internal.dto
 
+import com.github.kotlintubeexplode.internal.Protobuf
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
@@ -28,7 +29,19 @@ data class PlayerResponseDto(
 
     @SerialName("captions")
     val captions: CaptionsDto? = null
-)
+) {
+    /**
+     * Returns true if metadata can be extracted from this response.
+     *
+     * Upstream-equivalent of `PlayerResponse.IsAvailable`. Distinct from
+     * `playabilityStatus.isPlayable`: a video can be unavailable for streaming
+     * (LOGIN_REQUIRED, CONTENT_CHECK_REQUIRED, AGE_VERIFICATION_REQUIRED, etc.)
+     * but still expose its metadata.
+     */
+    val isAvailable: Boolean
+        get() = playabilityStatus?.status?.equals("error", ignoreCase = true) != true &&
+                videoDetails != null
+}
 
 /**
  * Playability status - indicates if the video is available.
@@ -48,10 +61,13 @@ data class PlayabilityStatusDto(
     val liveStreamability: JsonObject? = null
 ) {
     /**
-     * Returns true if the video is playable.
+     * Returns true if the video is playable (streams can be extracted).
+     *
+     * Upstream uses ordinal-ignore-case comparison; mirror that here so a
+     * lowercase "ok" from YouTube doesn't silently break stream extraction.
      */
     val isPlayable: Boolean
-        get() = status == "OK"
+        get() = status?.equals("OK", ignoreCase = true) == true
 
     /**
      * Returns true if this is a live stream.
@@ -63,15 +79,15 @@ data class PlayabilityStatusDto(
      * Returns true if the video is age-restricted.
      *
      * Age-restricted videos typically return:
-     * - status: "LOGIN_REQUIRED" with reason containing "age" or "Sign in to confirm your age"
-     * - Or status: "CONTENT_CHECK_REQUIRED"
+     * - status: "LOGIN_REQUIRED" or "CONTENT_CHECK_REQUIRED" or "AGE_VERIFICATION_REQUIRED"
+     * - Or reason containing the specific phrase "Sign in to confirm your age"
      *
-     * This is used to determine whether to fallback to the TV Embedded client.
+     * Used to determine whether to fall back to the TV Embedded client.
      */
     val isAgeRestricted: Boolean
-        get() = status == "LOGIN_REQUIRED" ||
-                status == "CONTENT_CHECK_REQUIRED" ||
-                reason?.contains("age", ignoreCase = true) == true ||
+        get() = status?.equals("LOGIN_REQUIRED", ignoreCase = true) == true ||
+                status?.equals("CONTENT_CHECK_REQUIRED", ignoreCase = true) == true ||
+                status?.equals("AGE_VERIFICATION_REQUIRED", ignoreCase = true) == true ||
                 reason?.contains("Sign in to confirm your age", ignoreCase = true) == true
 }
 
@@ -254,8 +270,20 @@ data class StreamFormatDto(
 
     // Audio track info (for videos with multiple audio languages)
     @SerialName("audioTrack")
-    val audioTrack: AudioTrackDto? = null
+    val audioTrack: AudioTrackDto? = null,
+
+    // Base64-encoded protobuf map<string,string>. {"sr":"1"} means Super Resolution upscaling.
+    @SerialName("xtags")
+    val xtags: String? = null
 ) {
+    /**
+     * Returns true if this stream was produced by YouTube's Super Resolution
+     * (AI upscaling). Detected via the `sr=1` entry in the `xtags` protobuf map.
+     */
+    val isVideoUpscaled: Boolean
+        get() = xtags?.takeIf { it.isNotBlank() }
+            ?.let(Protobuf::tryDeserializeMap)
+            ?.get("sr") == "1"
     /**
      * Returns true if this format requires signature decryption.
      */
@@ -307,9 +335,17 @@ data class StreamFormatDto(
     /**
      * Extracts the video codec from the codecs string.
      * For muxed streams, video codec comes first (before comma).
+     *
+     * YouTube returns the literal string "unknown" for some AV1 streams; map to
+     * the canonical AV1 codec string per upstream behavior.
      */
     val videoCodec: String?
-        get() = if (isAudioOnly) null else codecs?.substringBefore(",")?.trim()
+        get() = if (isAudioOnly) {
+            null
+        } else {
+            val raw = codecs?.substringBefore(",")?.trim()
+            if (raw?.equals("unknown", ignoreCase = true) == true) "av01.0.05M.08" else raw
+        }
 
     /**
      * Extracts the audio codec from the codecs string.
