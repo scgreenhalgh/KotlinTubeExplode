@@ -1,9 +1,13 @@
 package com.github.kotlintubeexplode.internal.dto
 
 import com.github.kotlintubeexplode.internal.Protobuf
+import com.github.kotlintubeexplode.internal.nullIfBlank
+import com.github.kotlintubeexplode.internal.parseQueryParameters
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 /**
  * DTO for YouTube's player API response.
@@ -58,7 +62,10 @@ data class PlayabilityStatusDto(
     val playableInEmbed: Boolean? = null,
 
     @SerialName("liveStreamability")
-    val liveStreamability: JsonObject? = null
+    val liveStreamability: JsonObject? = null,
+
+    @SerialName("errorScreen")
+    val errorScreen: JsonObject? = null
 ) {
     /**
      * Returns true if the video is playable (streams can be extracted).
@@ -89,6 +96,37 @@ data class PlayabilityStatusDto(
                 status?.equals("CONTENT_CHECK_REQUIRED", ignoreCase = true) == true ||
                 status?.equals("AGE_VERIFICATION_REQUIRED", ignoreCase = true) == true ||
                 reason?.contains("Sign in to confirm your age", ignoreCase = true) == true
+
+    /**
+     * Preview/trailer video id for pay-to-play videos, or null.
+     *
+     * Mirrors upstream PlayerResponse.PreviewVideoId (PlayerResponse.cs L94-122): when a video
+     * requires purchase, YouTube advertises a free preview clip inside playabilityStatus.errorScreen.
+     * Three historical renderer shapes are probed in priority order.
+     */
+    val previewVideoId: String?
+        get() {
+            val screen = errorScreen ?: return null
+
+            // 1. Modern: playerLegacyDesktopYpcTrailerRenderer.trailerVideoId
+            screen.childObject("playerLegacyDesktopYpcTrailerRenderer")
+                ?.childString("trailerVideoId")
+                ?.let { return it }
+
+            val ypc = screen.childObject("ypcTrailerRenderer")
+
+            // 2. ypcTrailerRenderer.playerVars -> video_id query parameter
+            ypc?.childString("playerVars")
+                ?.parseQueryParameters()?.get("video_id")?.nullIfBlank()
+                ?.let { return it }
+
+            // 3. ypcTrailerRenderer.playerResponse -> base64url-ish blob -> regex video_id=(11 chars)
+            ypc?.childString("playerResponse")
+                ?.let { decodePreviewVideoIdFromBlob(it) }
+                ?.let { return it }
+
+            return null
+        }
 }
 
 /**
@@ -472,3 +510,21 @@ data class TranslationLanguageDto(
     @SerialName("languageName")
     val languageName: CaptionNameDto? = null
 )
+
+private fun JsonObject.childObject(key: String): JsonObject? = this[key] as? JsonObject
+
+private fun JsonObject.childString(key: String): String? =
+    (this[key] as? JsonPrimitive)?.contentOrNull?.nullIfBlank()
+
+/**
+ * Best-effort decode of the legacy ypcTrailerRenderer.playerResponse blob. YouTube uses a
+ * base64url-ish encoding whose payload is partly garbage but reliably contains `video_id=<11>`.
+ * Returns null on any decode failure (slightly more defensive than upstream, which lets it throw).
+ */
+private fun decodePreviewVideoIdFromBlob(raw: String): String? = try {
+    val normalized = raw.replace('-', '+').replace('_', '/')
+    val decoded = String(java.util.Base64.getDecoder().decode(normalized), Charsets.UTF_8)
+    Regex("""video_id=(.{11})""").find(decoded)?.groupValues?.get(1)?.nullIfBlank()
+} catch (e: Exception) {
+    null
+}

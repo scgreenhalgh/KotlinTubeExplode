@@ -1,5 +1,7 @@
 package com.github.kotlintubeexplode.internal.dto
 
+import com.github.kotlintubeexplode.internal.parseXmlSecurely
+import org.w3c.dom.Element
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -27,108 +29,79 @@ internal data class ClosedCaptionTrackResponseDto(
          *
          * Expected format:
          * ```xml
-         * <transcript>
-         *   <text start="0" dur="5.5">Caption text</text>
-         *   <text start="5.5" dur="3.2">
-         *     <s t="0">Word1</s>
-         *     <s t="500">Word2</s>
-         *   </text>
-         * </transcript>
-         * ```
-         *
-         * Or newer format:
-         * ```xml
          * <timedtext>
          *   <body>
          *     <p t="0" d="5500">Caption text</p>
+         *     <p t="5500" d="3200">
+         *       <s t="0">Word1</s>
+         *       <s t="500">Word2</s>
+         *     </p>
          *   </body>
          * </timedtext>
          * ```
+         *
+         * Walks the parsed XML tree (mirroring upstream's XLinq approach in
+         * Bridge/ClosedCaptionTrackResponse.cs) rather than pattern-matching the raw
+         * string, so attribute order, self-closing elements, and nested markup are all
+         * handled by the XML parser.
          */
         fun parse(xml: String): ClosedCaptionTrackResponseDto {
+            // A blank body (e.g. an unexpected empty 200) has no captions; don't hand it
+            // to the XML parser, which would throw on premature end-of-input.
+            if (xml.isBlank()) return ClosedCaptionTrackResponseDto(emptyList())
+
+            val document = parseXmlSecurely(xml)
+
             val captions = mutableListOf<CaptionData>()
 
-            // Try to parse both formats
+            // Upstream: content.Descendants("p") — every <p> element, at any depth.
+            val pNodes = document.getElementsByTagName("p")
+            for (i in 0 until pNodes.length) {
+                val p = pNodes.item(i) as? Element ?: continue
 
-            // Format 1: <transcript><text>...</text></transcript>
-            val textPattern = Regex("""<text[^>]*\sstart="([^"]*)"[^>]*\sdur="([^"]*)"[^>]*>(.*?)</text>""", RegexOption.DOT_MATCHES_ALL)
-
-            // Format 2: <p t="..." d="...">...</p> (timedtext format)
-            val pPattern = Regex("""<p[^>]*\st="(\d+)"[^>]*\sd="(\d+)"[^>]*>(.*?)</p>""", RegexOption.DOT_MATCHES_ALL)
-
-            // Try format 1 first
-            var matches = textPattern.findAll(xml).toList()
-            if (matches.isEmpty()) {
-                // Try format 2
-                matches = pPattern.findAll(xml).toList()
-            }
-
-            for (match in matches) {
-                val (startStr, durStr, content) = match.destructured
-
-                val offset = parseTime(startStr)
-                val duration = parseTime(durStr)
-
-                // Parse parts (word-level timing)
-                val parts = mutableListOf<PartData>()
-                val partPattern = Regex("""<s[^>]*\s(?:t|ac)="(\d+)"[^>]*>(.*?)</s>""", RegexOption.DOT_MATCHES_ALL)
-                for (partMatch in partPattern.findAll(content)) {
-                    val (partOffsetStr, partText) = partMatch.destructured
-                    val partOffset = partOffsetStr.toLongOrNull()?.milliseconds ?: Duration.ZERO
-                    val decodedPartText = decodeHtmlEntities(partText.trim())
-                    if (decodedPartText.isNotEmpty()) {
-                        parts.add(PartData(decodedPartText, partOffset))
-                    }
-                }
-
-                // Extract text (remove nested tags)
-                val text = decodeHtmlEntities(content.replace(Regex("<[^>]+>"), "").trim())
-
-                captions.add(CaptionData(
-                    text = text.ifEmpty { null },
-                    offset = offset,
-                    duration = duration,
-                    parts = parts
-                ))
+                captions.add(
+                    CaptionData(
+                        // (string?)content: concatenation of all descendant text, with entities
+                        // already decoded by the XML parser. Deliberately NOT trimmed —
+                        // whitespace-only captions are meaningful and must survive
+                        // (https://github.com/Tyrrrz/YoutubeExplode/issues/671).
+                        text = p.textContent,
+                        offset = p.attributeMillis("t"),
+                        duration = p.attributeMillis("d"),
+                        parts = parseParts(p)
+                    )
+                )
             }
 
             return ClosedCaptionTrackResponseDto(captions)
         }
 
-        private fun parseTime(value: String): Duration? {
-            // Handle both seconds format (5.5) and milliseconds format (5500)
-            return when {
-                value.contains(".") -> {
-                    // Seconds format: 5.5 -> 5500ms
-                    val seconds = value.toDoubleOrNull() ?: return null
-                    (seconds * 1000).toLong().milliseconds
-                }
-                else -> {
-                    // Milliseconds format: 5500 -> 5500ms
-                    value.toLongOrNull()?.milliseconds
-                }
+        /**
+         * Word-level parts. Upstream uses `content.Elements("s")` — direct child `<s>`
+         * elements only, not descendants.
+         */
+        private fun parseParts(p: Element): List<PartData> {
+            val parts = mutableListOf<PartData>()
+            val children = p.childNodes
+            for (j in 0 until children.length) {
+                val s = children.item(j) as? Element ?: continue
+                if (s.tagName != "s") continue
+
+                // Upstream: t ?? ac ?? TimeSpan.Zero
+                val offset = s.attributeMillis("t")
+                    ?: s.attributeMillis("ac")
+                    ?: Duration.ZERO
+
+                parts.add(PartData(s.textContent, offset))
             }
+            return parts
         }
 
-        private fun decodeHtmlEntities(text: String): String {
-            return text
-                .replace("&amp;", "&")
-                .replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&quot;", "\"")
-                .replace("&#39;", "'")
-                .replace("&apos;", "'")
-                .replace("&#x27;", "'")
-                .replace("&#x2F;", "/")
-                .replace("&nbsp;", " ")
-                .replace(Regex("&#(\\d+);")) { match ->
-                    val code = match.groupValues[1].toIntOrNull()
-                    code?.toChar()?.toString() ?: match.value
-                }
-                .replace(Regex("&#x([0-9a-fA-F]+);")) { match ->
-                    val code = match.groupValues[1].toIntOrNull(16)
-                    code?.toChar()?.toString() ?: match.value
-                }
-        }
+        /**
+         * Reads an attribute as a millisecond [Duration], or null when absent/non-numeric.
+         * Missing attributes come back as "" from the DOM, which parses to null.
+         */
+        private fun Element.attributeMillis(name: String): Duration? =
+            getAttribute(name).toDoubleOrNull()?.milliseconds
     }
 }

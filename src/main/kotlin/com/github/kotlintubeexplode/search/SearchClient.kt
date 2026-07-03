@@ -53,7 +53,7 @@ class SearchClient internal constructor(
 
         // Paginate
         while (continuation != null) {
-            val nextResponse = performContinuation(continuation)
+            val nextResponse = performSearch(query, filter, continuation)
             val results = extractResults(nextResponse, filter, seenIds)
             if (results.isNotEmpty()) {
                 emit(Batch(results))
@@ -110,26 +110,21 @@ class SearchClient internal constructor(
         }
     }
 
-    private suspend fun performSearch(query: String, filter: SearchFilter): JsonObject {
+    /**
+     * Sends a single search request. Upstream (SearchController.cs) uses one body shape for
+     * both the initial and continuation calls: query + params + continuation + context, where
+     * `continuation` is a literal null on the first call. A null [continuation] and a None
+     * filter both serialize to JSON null, so the initial and paginated requests are identical
+     * in structure.
+     */
+    private suspend fun performSearch(
+        query: String,
+        filter: SearchFilter,
+        continuation: String? = null
+    ): JsonObject {
         val body = buildJsonObject {
             put("query", query)
-            put("context", buildClientContext())
-
-            // Add filter params if needed
-            when (filter) {
-                SearchFilter.Video -> put("params", "EgIQAQ%3D%3D") // Videos only
-                SearchFilter.Playlist -> put("params", "EgIQAw%3D%3D") // Playlists only
-                SearchFilter.Channel -> put("params", "EgIQAg%3D%3D") // Channels only
-                SearchFilter.None -> {} // No filter
-            }
-        }
-
-        val responseText = httpController.postJson(SEARCH_URL, body.toString())
-        return json.parseToJsonElement(responseText).jsonObject
-    }
-
-    private suspend fun performContinuation(continuation: String): JsonObject {
-        val body = buildJsonObject {
+            put("params", filterParams(filter))
             put("continuation", continuation)
             put("context", buildClientContext())
         }
@@ -138,12 +133,23 @@ class SearchClient internal constructor(
         return json.parseToJsonElement(responseText).jsonObject
     }
 
+    /**
+     * Maps a [SearchFilter] to YouTube's opaque `params` token, or null for no filter.
+     */
+    private fun filterParams(filter: SearchFilter): String? = when (filter) {
+        SearchFilter.Video -> "EgIQAQ%3D%3D" // Videos only
+        SearchFilter.Playlist -> "EgIQAw%3D%3D" // Playlists only
+        SearchFilter.Channel -> "EgIQAg%3D%3D" // Channels only
+        SearchFilter.None -> null
+    }
+
     private fun buildClientContext(): JsonObject = buildJsonObject {
         putJsonObject("client") {
             put("clientName", "WEB")
-            put("clientVersion", "2.20231219.04.00")
+            put("clientVersion", "2.20210408.08.00")
             put("hl", "en")
             put("gl", "US")
+            put("utcOffsetMinutes", 0)
         }
     }
 
@@ -161,8 +167,13 @@ class SearchClient internal constructor(
             }
         }
 
-        // Extract playlists
+        // Extract playlists. YouTube is migrating playlist results to the newer
+        // lockupViewModel renderer; keep the legacy playlistRenderer path too so results
+        // aren't dropped in regions still serving the old shape. seenIds dedups any overlap.
         if (filter == SearchFilter.None || filter == SearchFilter.Playlist) {
+            response.findAllByKey("lockupViewModel").forEach { renderer ->
+                parseLockupPlaylistResult(renderer, seenIds)?.let { results.add(it) }
+            }
             response.findAllByKey("playlistRenderer").forEach { renderer ->
                 parsePlaylistResult(renderer, seenIds)?.let { results.add(it) }
             }
@@ -243,6 +254,67 @@ class SearchClient internal constructor(
             author = author,
             thumbnails = thumbnails
         )
+    }
+
+    /**
+     * Parses a playlist from YouTube's newer `lockupViewModel` renderer. lockupViewModel is a
+     * generic collection renderer, so entries whose contentType clearly names a video / channel /
+     * short are skipped rather than emitted as playlists. Unknown or absent contentTypes are let
+     * through so a newly introduced playlist type isn't silently dropped. Field layout mirrors
+     * upstream SearchResponse.PlaylistData.
+     */
+    private fun parseLockupPlaylistResult(renderer: JsonObject, seenIds: MutableSet<String>): PlaylistSearchResult? {
+        val contentType = renderer.findString("contentType")
+        if (contentType != null &&
+            (contentType.contains("VIDEO") || contentType.contains("CHANNEL") || contentType.contains("SHORT"))
+        ) return null
+
+        val playlistId = renderer.findString("contentId")
+            ?: renderer.findString("playlistId")
+            ?: return null
+        if (PlaylistId.tryParse(playlistId) == null) return null
+
+        val metadata = (renderer["metadata"] as? JsonObject)
+            ?.get("lockupMetadataViewModel") as? JsonObject
+            ?: return null
+
+        val title = metadata.findString("title", "content") ?: return null
+
+        if (!seenIds.add("playlist:$playlistId")) return null
+
+        // Author is carried by the first metadataParts entry's text node.
+        val authorText = metadata.findAllByKey("metadataParts").firstOrNull()
+            ?.get("text") as? JsonObject
+        val authorName = authorText?.findString("content")
+        val authorId = authorText?.findString(
+            "commandRuns", "0", "onTap", "innertubeCommand", "browseEndpoint", "browseId"
+        ) ?: authorText?.findString("navigationEndpoint", "browseEndpoint", "browseId")
+
+        val author = if (authorName != null && authorId != null) {
+            Author(authorId, authorName)
+        } else null
+
+        return PlaylistSearchResult(
+            id = PlaylistId(playlistId),
+            title = title,
+            author = author,
+            thumbnails = extractLockupThumbnails(renderer)
+        )
+    }
+
+    private fun extractLockupThumbnails(renderer: JsonObject): List<Thumbnail> {
+        val sources = renderer.findArray(
+            "contentImage", "collectionThumbnailViewModel", "primaryThumbnail",
+            "thumbnailViewModel", "image", "sources"
+        ) ?: return emptyList()
+
+        return sources.mapNotNull { source ->
+            val obj = source.jsonObject
+            val url = obj["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val width = obj["width"]?.jsonPrimitive?.intOrNull ?: 0
+            val height = obj["height"]?.jsonPrimitive?.intOrNull ?: 0
+            Thumbnail(url, width, height)
+        }
     }
 
     private fun parseChannelResult(renderer: JsonObject, seenIds: MutableSet<String>): ChannelSearchResult? {

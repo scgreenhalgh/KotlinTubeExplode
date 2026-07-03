@@ -25,7 +25,12 @@ class ClosedCaptionClient internal constructor(
      * @return The closed caption manifest containing available tracks
      */
     suspend fun getManifest(videoId: VideoId): ClosedCaptionManifest {
-        val playerResponse = videoController.getPlayerResponse(videoId)
+        // Source the tracklist from the ANDROID_VR youtubei/v1/player API, exactly like
+        // upstream's ClosedCaptionController (which extends VideoController and calls
+        // GetPlayerResponseAsync). The watch page's WEB caption baseUrls now return HTTP 200
+        // with an empty body — same PO-token-style requirement that pushed stream extraction
+        // onto ANDROID_VR — whereas ANDROID_VR caption URLs still serve real timedtext.
+        val playerResponse = videoController.getPlayerResponseViaAndroidClient(videoId)
 
         val tracks = playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks
             ?.mapNotNull { track ->

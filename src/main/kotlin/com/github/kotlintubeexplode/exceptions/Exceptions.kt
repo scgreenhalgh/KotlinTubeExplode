@@ -1,5 +1,7 @@
 package com.github.kotlintubeexplode.exceptions
 
+import com.github.kotlintubeexplode.core.VideoId
+
 /**
  * Base exception thrown within KotlinTubeExplode.
  */
@@ -22,7 +24,7 @@ class VideoUnavailableException(message: String) : VideoUnplayableException(mess
  */
 class VideoRequiresPurchaseException(
     message: String,
-    val previewVideoId: String
+    val previewVideoId: VideoId
 ) : VideoUnplayableException(message)
 
 /**

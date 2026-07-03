@@ -24,6 +24,20 @@ data class Thumbnail(
      */
     val resolution: Resolution
         get() = Resolution(width, height)
+
+    companion object {
+        /**
+         * The default thumbnail set YouTube guarantees for any video, derived from the
+         * video ID alone. Appended to API-provided thumbnails so callers always have at
+         * least low/medium/high resolution images. Mirrors upstream YoutubeExplode's
+         * internal `Thumbnail.GetDefaultSet`.
+         */
+        internal fun getDefaultSet(videoId: String): List<Thumbnail> = listOf(
+            Thumbnail("https://img.youtube.com/vi/$videoId/default.jpg", 120, 90),
+            Thumbnail("https://img.youtube.com/vi/$videoId/mqdefault.jpg", 320, 180),
+            Thumbnail("https://img.youtube.com/vi/$videoId/hqdefault.jpg", 480, 360)
+        )
+    }
 }
 
 /**

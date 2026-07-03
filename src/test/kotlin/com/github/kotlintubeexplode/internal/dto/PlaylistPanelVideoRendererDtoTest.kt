@@ -1,6 +1,8 @@
 package com.github.kotlintubeexplode.internal.dto
 
 import io.kotest.matchers.shouldBe
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
@@ -56,6 +58,70 @@ class PlaylistPanelVideoRendererDtoTest {
         fun `should return null when both lengthSeconds and lengthText absent`() {
             val dto = PlaylistPanelVideoRendererDto()
             dto.durationSeconds shouldBe null
+        }
+    }
+
+    @Nested
+    @DisplayName("authorChannelId")
+    inner class AuthorChannelIdTests {
+
+        private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+        @Test
+        fun `should fall back to multi-author dialog onTap browseId when byline has no browseEndpoint`() {
+            // Multi-author videos (music tracks with featured artists) don't expose the uploader
+            // channel via longBylineText.runs[0].navigationEndpoint.browseEndpoint. The channel link
+            // lives behind a "..." dialog. Upstream PlaylistVideoData.ChannelId recovers it via
+            // navigationEndpoint.showDialogCommand -> ... -> listItems[0] -> onTap -> browseId.
+            val raw = """
+                {
+                  "videoId": "abc123",
+                  "title": { "simpleText": "Multi-author track" },
+                  "longBylineText": {
+                    "runs": [
+                      {
+                        "text": "Featured Artist",
+                        "navigationEndpoint": {
+                          "showDialogCommand": {
+                            "panelLoadingStrategy": {
+                              "inlineContent": {
+                                "dialogViewModel": {
+                                  "customContent": {
+                                    "listViewModel": {
+                                      "listItems": [
+                                        {
+                                          "listItemViewModel": {
+                                            "rendererContext": {
+                                              "commandContext": {
+                                                "onTap": {
+                                                  "innertubeCommand": {
+                                                    "browseEndpoint": { "browseId": "UCdeepfallback123" }
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+            """.trimIndent()
+
+            val dto = json.decodeFromString<PlaylistPanelVideoRendererDto>(raw)
+
+            // Sanity: the author NAME is recoverable today (only the channel id needs the fallback).
+            dto.authorName shouldBe "Featured Artist"
+            // Before the fix authorChannelId is null (no dialog fallback) -> this assertion FAILS.
+            dto.authorChannelId shouldBe "UCdeepfallback123"
         }
     }
 }

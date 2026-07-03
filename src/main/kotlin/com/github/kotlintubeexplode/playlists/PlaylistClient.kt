@@ -117,10 +117,10 @@ class PlaylistClient internal constructor(
                 val authorName = videoData.authorName ?: continue
                 val authorChannelId = videoData.authorChannelId ?: continue
 
-                val thumbnails = videoData.thumbnail?.thumbnails?.mapNotNull { thumb ->
+                val thumbnails = (videoData.thumbnail?.thumbnails?.mapNotNull { thumb ->
                     val url = thumb.url ?: return@mapNotNull null
                     Thumbnail(url, thumb.width ?: 0, thumb.height ?: 0)
-                } ?: emptyList()
+                } ?: emptyList()) + Thumbnail.getDefaultSet(videoId)
 
                 newVideos += PlaylistVideo(
                     playlistId = playlistId,

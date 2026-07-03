@@ -133,14 +133,9 @@ class StreamIntegrationTest {
             client.streams.download(streamInfo, target.toString())
 
             target.exists() shouldBe true
-            // Upstream asserts strict equality. Our chunked download is currently off by a
-            // small number of bytes for some streams (KNOWN_DRIFT #17). Allow a tolerance
-            // here so the test surfaces gross failures without blocking on the byte-exact
-            // bug that's tracked separately. Tighten to `shouldBe` once #17 is fixed.
-            val actual = target.fileSize()
-            val expected = streamInfo.size.bytes
-            val diff = kotlin.math.abs(actual - expected)
-            assert(diff <= 16L) { "Downloaded $actual bytes, expected $expected (±16 tolerance for drift #17)" }
+            // #17 fixed: MediaStream no longer folds Java's -1 EOF into the position at segment
+            // boundaries, so the downloaded file is byte-exact (matches upstream's strict equality).
+            target.fileSize() shouldBe streamInfo.size.bytes
         }
     }
 

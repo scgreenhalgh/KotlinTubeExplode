@@ -126,14 +126,17 @@ internal class MediaStream(
             }
 
             val bytesRead = readSegment(buffer, offset, length)
-            position = requestedPosition + bytesRead
-            actualPosition = position
 
             if (bytesRead > 0) {
+                position = requestedPosition + bytesRead
+                actualPosition = position
                 return bytesRead
             }
 
-            // End of segment, load next one
+            // End of segment. Java's InputStream.read returns -1 at EOF (unlike .NET's
+            // Stream.ReadAsync, which returns 0), so we must NOT fold bytesRead into
+            // position here — adding -1 rewinds one byte per segment boundary and
+            // re-reads it, producing files N bytes too large (KNOWN_DRIFT #17).
             resetSegment()
         }
     }
@@ -145,7 +148,11 @@ internal class MediaStream(
      */
     fun seek(newPosition: Long) {
         require(newPosition >= 0) { "Position cannot be negative" }
-        require(newPosition <= totalLength) { "Position cannot exceed stream length" }
+        // No upper-bound guard: upstream YoutubeExplode's MediaStream.Seek (6.6 and prime)
+        // lets Position exceed Length. Reads past the end already return EOF (readAsync
+        // returns -1 once position >= totalLength), so overshoot is harmless. A normal
+        // video's smallest audio stream can be <1000 bytes (init-segment-style); guarding
+        // here would wrongly reject a legitimate seek(1000) on such a stream.
         position = newPosition
     }
 

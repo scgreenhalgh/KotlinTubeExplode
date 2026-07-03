@@ -118,9 +118,10 @@ internal class PlaylistController(
             put("hl", "en")
             put("gl", "US")
             put("utcOffsetMinutes", 0)
-            if (!visitorData.isNullOrBlank()) {
-                put("visitorData", visitorData)
-            }
+            // Always emit the field to mirror upstream's Json.Encode(visitorData) wire shape:
+            // JSON null when unset, the token otherwise. Matches the sibling videoId handling in
+            // buildNextRequestBody above and keeps exact next-request body parity with upstream.
+            put("visitorData", visitorData)
         }
     }
 }

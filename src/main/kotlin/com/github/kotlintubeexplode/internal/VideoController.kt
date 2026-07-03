@@ -131,8 +131,23 @@ internal class VideoController(
             cachedPlayerScriptUrl = url
         }
 
-        // Step 3: Parse the player response
-        val playerResponse = pageParser.parseWatchPage(html)
+        // Step 3: Resolve the player response.
+        // Upstream (VideoClient.GetAsync) treats the watch page's embedded player response as
+        // the canonical metadata source and only falls back to the ANDROID_VR player API when
+        // the page embeds none: `watchPage.PlayerResponse ?? GetPlayerResponseAsync(videoId)`.
+        // Keep the watch page primary and use the API purely as a resilience fallback for the
+        // occasional page whose embedded response is missing or unparseable.
+        val fromWatchPage = try {
+            pageParser.parseWatchPage(html)
+        } catch (e: VideoParseException) {
+            null
+        }
+
+        val playerResponse = if (fromWatchPage?.videoDetails != null) {
+            fromWatchPage
+        } else {
+            getPlayerResponseViaAndroidClient(videoId)
+        }
 
         // Step 4: Validate video availability
         validateAvailability(videoId, playerResponse)
@@ -226,8 +241,13 @@ internal class VideoController(
      * bypasses this requirement while maintaining full format access.
      *
      * @param videoId The video ID
+     * @param signatureTimestamp Intentionally ignored. ANDROID_VR returns plain (un-ciphered)
+     *   stream URLs, so it never needs signature deciphering. Upstream never sends a
+     *   signatureTimestamp / playbackContext for this client; the parameter is retained only
+     *   for call-site compatibility.
      * @return The player response
      */
+    @Suppress("UNUSED_PARAMETER")
     suspend fun getPlayerResponseViaAndroidClient(
         videoId: VideoId,
         signatureTimestamp: String? = null
@@ -257,14 +277,6 @@ internal class VideoController(
                     put("utcOffsetMinutes", 0)
                 }
             }
-            // Include signatureTimestamp if provided (helps with some edge cases)
-            signatureTimestamp?.let { sts ->
-                putJsonObject("playbackContext") {
-                    putJsonObject("contentPlaybackContext") {
-                        put("signatureTimestamp", sts)
-                    }
-                }
-            }
         }.toString()
 
         val headers = mapOf(
@@ -292,6 +304,13 @@ internal class VideoController(
         videoId: VideoId,
         signatureTimestamp: String
     ): PlayerResponseDto {
+        val visitorData = try {
+            resolveVisitorData()
+        } catch (e: Exception) {
+            // Fallback to empty visitor data if resolution fails
+            ""
+        }
+
         val requestBody = buildJsonObject {
             put("videoId", videoId.value)
             put("contentCheckOk", true)
@@ -300,8 +319,10 @@ internal class VideoController(
                 putJsonObject("client") {
                     put("clientName", TV_EMBEDDED_CLIENT_NAME)
                     put("clientVersion", TV_EMBEDDED_CLIENT_VERSION)
+                    put("visitorData", visitorData)
                     put("hl", "en")
                     put("gl", "US")
+                    put("utcOffsetMinutes", 0)
                 }
                 putJsonObject("thirdParty") {
                     // Required for bypassing embed restrictions

@@ -64,6 +64,14 @@ internal class HttpController(
         const val CONSENT_COOKIE_VALUE = "CAISEwgDEgk4MTM4MzYzNTIaAmVuIAEaBgiApPzGBg"
 
         /**
+         * Maximum number of retries for transient 5xx server errors.
+         *
+         * Mirrors upstream YoutubeHttpHandler.SendAsync, which retries any response with a
+         * status >= 500 up to 5 times (6 attempts total) before returning it.
+         */
+        const val MAX_SERVER_ERROR_RETRIES = 5
+
+        /**
          * Certificate pinner for YouTube and Google Video domains.
          *
          * Pins to Google Trust Services root certificates to prevent MITM attacks.
@@ -179,10 +187,10 @@ internal class HttpController(
         val origin = "${httpUrl.scheme}://${httpUrl.host}"
         val token = "$timestamp $sessionId $origin"
 
-        // SHA-1 hash
+        // SHA-1 hash, uppercase hex to match upstream's Convert.ToHexString.
         val hash = MessageDigest.getInstance("SHA-1")
             .digest(token.toByteArray())
-            .joinToString("") { "%02x".format(it) }
+            .joinToString("") { "%02X".format(it) }
 
         return "SAPISIDHASH ${timestamp}_$hash"
     }
@@ -307,10 +315,31 @@ internal class HttpController(
     }
 
     /**
+     * Executes an OkHttp call, retrying transient 5xx server errors.
+     *
+     * Mirrors upstream YoutubeHttpHandler.SendAsync: any response with a status >= 500 is
+     * retried up to [MAX_SERVER_ERROR_RETRIES] times (6 attempts total), then the last
+     * response is returned for the caller to handle. Every request method routes through
+     * here, so getStream/getContentLength get the same resilience as get/postJson.
+     */
+    private fun executeWithServerErrorRetry(request: Request): okhttp3.Response {
+        var retriesRemaining = MAX_SERVER_ERROR_RETRIES
+        while (true) {
+            val response = client.newCall(request).execute()
+            if (response.code >= 500 && retriesRemaining > 0) {
+                retriesRemaining--
+                response.close()
+                continue
+            }
+            return response
+        }
+    }
+
+    /**
      * Executes a request and returns the response body.
      */
     private fun executeRequest(request: Request, url: String): String {
-        val response = client.newCall(request).execute()
+        val response = executeWithServerErrorRetry(request)
 
         return response.use { resp ->
             // Process Set-Cookie headers
@@ -386,7 +415,7 @@ internal class HttpController(
         val (_, builder) = newStandardRequest(url, headers)
         val request = builder.get().build()
 
-        val response = client.newCall(request).execute()
+        val response = executeWithServerErrorRetry(request)
 
         if (response.code == 429) {
             response.close()
@@ -414,7 +443,7 @@ internal class HttpController(
         val (_, builder) = newStandardRequest(url)
         val request = builder.head().build()
 
-        val response = client.newCall(request).execute()
+        val response = executeWithServerErrorRetry(request)
         response.use {
             if (it.isSuccessful) {
                 it.header("Content-Length")?.toLongOrNull()

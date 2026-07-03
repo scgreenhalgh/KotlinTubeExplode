@@ -1,5 +1,6 @@
 package com.github.kotlintubeexplode.exceptions
 
+import com.github.kotlintubeexplode.core.VideoId
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import org.junit.jupiter.api.DisplayName
@@ -66,19 +67,19 @@ class ExceptionsTest {
 
         @Test
         fun `should extend VideoUnplayableException`() {
-            val exception = VideoRequiresPurchaseException("Requires purchase", "previewId123")
+            val exception = VideoRequiresPurchaseException("Requires purchase", VideoId.parse("9bZkp7q19f0"))
             exception.shouldBeInstanceOf<VideoUnplayableException>()
         }
 
         @Test
         fun `should have preview video ID`() {
-            val exception = VideoRequiresPurchaseException("Requires purchase", "previewId123")
-            exception.previewVideoId shouldBe "previewId123"
+            val exception = VideoRequiresPurchaseException("Requires purchase", VideoId.parse("9bZkp7q19f0"))
+            exception.previewVideoId shouldBe VideoId.parse("9bZkp7q19f0")
         }
 
         @Test
         fun `should have correct message`() {
-            val exception = VideoRequiresPurchaseException("This video requires purchase", "abc123")
+            val exception = VideoRequiresPurchaseException("This video requires purchase", VideoId.parse("9bZkp7q19f0"))
             exception.message shouldBe "This video requires purchase"
         }
     }
@@ -137,7 +138,7 @@ class ExceptionsTest {
                 KotlinTubeExplodeException("base"),
                 VideoUnplayableException("unplayable"),
                 VideoUnavailableException("unavailable"),
-                VideoRequiresPurchaseException("purchase", "preview"),
+                VideoRequiresPurchaseException("purchase", VideoId.parse("9bZkp7q19f0")),
                 RequestLimitExceededException("rate limit"),
                 PlaylistUnavailableException("playlist"),
                 ChannelUnavailableException("channel"),
@@ -154,7 +155,7 @@ class ExceptionsTest {
             val videoExceptions = listOf<Exception>(
                 VideoUnplayableException("unplayable"),
                 VideoUnavailableException("unavailable"),
-                VideoRequiresPurchaseException("purchase", "preview")
+                VideoRequiresPurchaseException("purchase", VideoId.parse("9bZkp7q19f0"))
             )
 
             videoExceptions.forEach { e ->

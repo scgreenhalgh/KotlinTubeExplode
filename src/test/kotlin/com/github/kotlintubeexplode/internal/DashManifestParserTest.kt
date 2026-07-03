@@ -90,4 +90,27 @@ class DashManifestParserTest {
             parser.parse(malformed)
         }
     }
+
+    @Test
+    fun `video stream without frameRate attribute defaults framerate to 24`() {
+        // Drift #30: upstream Bridge/DashManifest.cs exposes VideoFramerate as nullable and
+        // StreamClient.cs applies `?? 24` when it's absent. Our DASH parser must default a
+        // missing frameRate attribute to 24, not 30.
+        val manifestXml = """
+            <MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+              <Period>
+                <AdaptationSet mimeType="video/mp4">
+                  <Representation id="137" codecs="avc1.640028" bandwidth="4500000" width="1920" height="1080">
+                    <BaseURL>https://googlevideo.com/videoplayback/id/137/clen/999999</BaseURL>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        """.trimIndent()
+
+        val streams = parser.parse(manifestXml)
+
+        val video = streams.filterIsInstance<VideoOnlyStreamInfo>().single()
+        video.videoQuality.framerate shouldBe 24
+    }
 }

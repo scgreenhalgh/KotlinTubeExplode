@@ -1,5 +1,6 @@
 package com.github.kotlintubeexplode.channels
 
+import com.github.kotlintubeexplode.testdata.ChannelSlugs
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.DisplayName
@@ -101,21 +102,51 @@ class ChannelIdTest {
     inner class ChannelSlugTests {
 
         @Test
-        fun `should accept valid slug`() {
-            val slug = ChannelSlug.parse("google-developers")
-            slug.value shouldBe "google-developers"
+        fun `should accept valid alphanumeric slug`() {
+            val slug = ChannelSlug.parse("GoogleDevelopers")
+            slug.value shouldBe "GoogleDevelopers"
         }
 
         @Test
-        fun `should extract from custom URL`() {
-            val slug = ChannelSlug.parse("https://www.youtube.com/c/google-developers")
-            slug.value shouldBe "google-developers"
+        fun `should accept unicode-letter slug`() {
+            // Mirrors upstream TestData/ChannelSlugs.cs "Normal". Validation uses
+            // Char.isLetterOrDigit (Unicode-aware), so non-ASCII letters are valid.
+            val slug = ChannelSlug.parse(ChannelSlugs.Normal)
+            slug.value shouldBe ChannelSlugs.Normal
+        }
+
+        @Test
+        fun `should extract alphanumeric slug from custom URL`() {
+            val slug = ChannelSlug.parse("https://www.youtube.com/c/LinusTechTips")
+            slug.value shouldBe "LinusTechTips"
         }
 
         @Test
         fun `should generate correct URL`() {
-            val slug = ChannelSlug("google-developers")
-            slug.url shouldBe "https://www.youtube.com/c/google-developers"
+            val slug = ChannelSlug("GoogleDevelopers")
+            slug.url shouldBe "https://www.youtube.com/c/GoogleDevelopers"
+        }
+
+        // Drift #7: upstream ChannelSlug.IsValid restricts to char.IsLetterOrDigit only
+        // (Feb 2024). We previously also accepted '-', '_' and '.'; those are now rejected.
+        @Test
+        fun `should reject slug containing a hyphen`() {
+            ChannelSlug.tryParse("google-developers") shouldBe null
+        }
+
+        @Test
+        fun `should reject slug containing an underscore`() {
+            ChannelSlug.tryParse("google_developers") shouldBe null
+        }
+
+        @Test
+        fun `should reject slug containing a dot`() {
+            ChannelSlug.tryParse("google.developers") shouldBe null
+        }
+
+        @Test
+        fun `should reject a non-alphanumeric slug extracted from a custom URL`() {
+            ChannelSlug.isValid("https://www.youtube.com/c/google-developers") shouldBe false
         }
     }
 

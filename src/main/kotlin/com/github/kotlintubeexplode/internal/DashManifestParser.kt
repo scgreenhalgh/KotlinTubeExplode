@@ -4,8 +4,6 @@ import com.github.kotlintubeexplode.common.Resolution
 import com.github.kotlintubeexplode.videos.streams.*
 import org.w3c.dom.Element
 import org.w3c.dom.NodeList
-import java.io.StringReader
-import javax.xml.parsers.DocumentBuilderFactory
 
 /**
  * Parser for DASH manifests.
@@ -24,17 +22,7 @@ internal class DashManifestParser {
     fun parse(manifestXml: String): List<IStreamInfo> {
         val streams = mutableListOf<IStreamInfo>()
 
-        val factory = DocumentBuilderFactory.newInstance().apply {
-            // Prevent XXE (XML External Entity) attacks
-            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-            setFeature("http://xml.org/sax/features/external-general-entities", false)
-            setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-            setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
-            setXIncludeAware(false)
-            setExpandEntityReferences(false)
-        }
-        val builder = factory.newDocumentBuilder()
-        val document = builder.parse(manifestXml.byteInputStream())
+        val document = parseXmlSecurely(manifestXml)
 
         val representations = document.getElementsByTagName("Representation")
         for (i in 0 until representations.length) {
@@ -83,7 +71,9 @@ internal class DashManifestParser {
         // Parse video dimensions
         val width = element.getAttribute("width").toIntOrNull()
         val height = element.getAttribute("height").toIntOrNull()
-        val framerate = element.getAttribute("frameRate").toIntOrNull() ?: 30
+        // Upstream Bridge/DashManifest.cs exposes framerate as nullable; StreamClient.cs
+        // defaults a missing framerate to 24 (drift #30). Match that rather than 30.
+        val framerate = element.getAttribute("frameRate").toIntOrNull() ?: 24
 
         return if (hasAudio && width == null) {
             // Audio-only stream

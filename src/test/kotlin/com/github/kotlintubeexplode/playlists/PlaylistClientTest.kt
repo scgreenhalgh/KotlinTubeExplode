@@ -9,6 +9,8 @@ import com.github.kotlintubeexplode.internal.dto.NavigationEndpointDto
 import com.github.kotlintubeexplode.internal.dto.TextRunDto
 import com.github.kotlintubeexplode.internal.dto.TextRunsDto
 import com.github.kotlintubeexplode.internal.dto.BrowseEndpointDto
+import com.github.kotlintubeexplode.internal.dto.ThumbnailContainerDto
+import com.github.kotlintubeexplode.internal.dto.ThumbnailDto
 import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
@@ -114,6 +116,58 @@ class PlaylistClientTest {
                 .flatMap { it.items }
 
             videos shouldHaveSize 2
+        }
+
+        @Test
+        fun `should append the default thumbnail set after API-provided video thumbnails`() = runTest {
+            // Upstream PlaylistClient concats Thumbnail.GetDefaultSet(videoId) onto the API
+            // thumbnails for every playlist video, so callers always have low/medium/high
+            // fallback images and the API entries come first.
+            val http = mockk<HttpController>(relaxed = true)
+            val ctrl = mockk<PlaylistController>()
+
+            val vid = "abcDEF12345"
+            val renderer = PlaylistPanelVideoRendererDto(
+                videoId = vid,
+                title = TextRunsDto(simpleText = "Title"),
+                longBylineText = TextRunsDto(
+                    runs = listOf(
+                        TextRunDto(
+                            text = "Author",
+                            navigationEndpoint = NavigationEndpointDto(
+                                browseEndpoint = BrowseEndpointDto(browseId = "UCauthor")
+                            )
+                        )
+                    )
+                ),
+                thumbnail = ThumbnailContainerDto(
+                    thumbnails = listOf(
+                        ThumbnailDto(url = "https://api.example/thumb.jpg", width = 100, height = 100)
+                    )
+                ),
+                navigationEndpoint = NavigationEndpointDto(
+                    watchEndpoint = WatchEndpointDto(index = 1)
+                )
+            )
+
+            coEvery {
+                ctrl.getPlaylistNextResponse(playlistId, null, 0, null)
+            } returns PlaylistNextResponseDto(contents = makeContents(listOf(renderer)))
+
+            coEvery {
+                ctrl.getPlaylistNextResponse(playlistId, vid, 1, any())
+            } returns PlaylistNextResponseDto(contents = makeContents(emptyList()))
+
+            val client = PlaylistClient(http, ctrl)
+            val videos = client.getVideoBatches(playlistId).toList().flatMap { it.items }
+
+            videos shouldHaveSize 1
+            videos[0].thumbnails.map { it.url } shouldBe listOf(
+                "https://api.example/thumb.jpg",
+                "https://img.youtube.com/vi/$vid/default.jpg",
+                "https://img.youtube.com/vi/$vid/mqdefault.jpg",
+                "https://img.youtube.com/vi/$vid/hqdefault.jpg"
+            )
         }
     }
 

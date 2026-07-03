@@ -2,7 +2,7 @@ package com.github.kotlintubeexplode.videos.streams
 
 import com.github.kotlintubeexplode.common.Language
 import com.github.kotlintubeexplode.core.VideoId
-import com.github.kotlintubeexplode.exceptions.VideoUnavailableException
+import com.github.kotlintubeexplode.exceptions.VideoRequiresPurchaseException
 import com.github.kotlintubeexplode.exceptions.VideoUnplayableException
 import com.github.kotlintubeexplode.internal.*
 import com.github.kotlintubeexplode.internal.cipher.CipherManifest
@@ -46,7 +46,13 @@ class StreamClient internal constructor(
             } catch (e: com.github.kotlintubeexplode.exceptions.RequestLimitExceededException) {
                 // Don't retry rate limit errors
                 throw e
-            } catch (e: Exception) {
+            } catch (e: java.io.IOException) {
+                // Only retry transient network failures (IOException, incl. our HttpException).
+                // Non-IOException failures — parser regressions (VideoParseException),
+                // deserialization errors, and coroutine CancellationException — must surface
+                // immediately instead of being retried 5x and masked. Mirrors upstream
+                // StreamClient.GetManifestAsync, which retries only when
+                // `ex is HttpRequestException or IOException`.
                 lastException = e
                 if (attempt < 4) {
                     kotlinx.coroutines.delay(100L * (1 shl attempt))
@@ -194,12 +200,24 @@ class StreamClient internal constructor(
      *
      * Order of attempts:
      * 1. Android client - Primary, returns plain URLs without cipher (fastest)
-     * 2. TV Embedded client - For age-restricted videos (requires cipher)
-     * 3. Web client - Fallback (requires cipher)
+     * 2. TV Embedded client - For age-restricted and otherwise-unplayable videos (requires cipher)
+     *
+     * If neither client yields a stream the video is reported unplayable. Matching upstream,
+     * there is no third watch-page/web-client stream fallback.
      */
     private suspend fun getStreamInfos(videoId: VideoId): List<IStreamInfo> {
         // 1. Try Android client first (no cipher needed for most streams)
         val androidResponse = tryAndroidClient(videoId)
+
+        // Pay-to-play videos aren't "OK": YouTube advertises a free preview/trailer id inside
+        // playabilityStatus.errorScreen. Upstream (StreamClient.cs GetStreamInfosAsync, L214-221)
+        // throws VideoRequiresPurchaseException for these before any stream extraction.
+        androidResponse?.playabilityStatus?.previewVideoId?.let { previewId ->
+            throw VideoRequiresPurchaseException(
+                "Video '${videoId.value}' requires purchase and cannot be played.",
+                VideoId.parse(previewId)
+            )
+        }
 
         if (androidResponse != null) {
             val androidStreams = tryProcessAndroidStreams(androidResponse)
@@ -208,19 +226,35 @@ class StreamClient internal constructor(
             }
         }
 
-        // Check if age-restricted (Android client will indicate this)
-        val isAgeRestricted = androidResponse?.playabilityStatus?.isAgeRestricted == true
+        // The cipher-less Android client yielded no usable streams. Upstream (StreamClient.cs
+        // GetStreamInfosAsync) falls back to the TVHTML5 embedded (cipher) client on ANY
+        // VideoUnplayableException that is NOT a VideoUnavailableException — i.e. whenever the
+        // video isn't deleted/private/region-blocked. That covers age-restricted videos AND
+        // videos that report playable but expose no streams to the cipher-less client (the
+        // "does not contain any playable streams" case). The old isAgeRestricted string
+        // heuristic missed the latter and dropped those videos straight to the dead web path.
+        // isAvailable mirrors upstream PlayerResponse.IsAvailable (status != "error" && details);
+        // age-restricted responses stay isAvailable == true, so this preserves that fallback.
+        val isUnavailable = androidResponse != null && !androidResponse.isAvailable
 
-        // 2. If age-restricted, try TV Embedded client
-        if (isAgeRestricted) {
+        // 2. Fall back to the TV Embedded (cipher) client unless the video is definitively unavailable.
+        if (!isUnavailable) {
             val tvStreams = tryTVEmbeddedClient(videoId)
             if (tvStreams.isNotEmpty()) {
                 return tvStreams
             }
         }
 
-        // 3. Fallback to web client (current implementation with cipher)
-        return getStreamInfosViaWebClient(videoId)
+        // Upstream stops here. Its stream extraction (StreamClient.cs GetStreamInfosAsync,
+        // tag 6.6 AND branch prime) tries exactly two clients — cipher-less ANDROID_VR, then
+        // TVHTML5_SIMPLY_EMBEDDED_PLAYER on VideoUnplayableException — and then reports the
+        // video unplayable. There is no third watch-page/web-client stream fallback: the WEB
+        // client's stream URLs now require a PO token and 403 on download, so it can only ever
+        // return undownloadable streams (or, once verifyStreamUrl drops them, an empty manifest
+        // that masks the real failure). Fail loudly to match upstream. See KNOWN_DRIFT #9.
+        throw VideoUnplayableException(
+            "Video '${videoId.value}' does not contain any playable streams."
+        )
     }
 
     /**
@@ -320,69 +354,6 @@ class StreamClient internal constructor(
     }
 
     /**
-     * Gets streams via web client (original implementation with cipher).
-     * Used as fallback when Android and TV Embedded clients fail.
-     */
-    private suspend fun getStreamInfosViaWebClient(videoId: VideoId): List<IStreamInfo> {
-        val streams = mutableListOf<IStreamInfo>()
-
-        // Get video page and player response
-        val watchUrl = "https://www.youtube.com/watch?v=${videoId.value}&bpctr=9999999999"
-        val html = httpController.getWithRetry(watchUrl, maxRetries = 3)
-
-        val pageParser = VideoPageParser()
-        val playerResponse = pageParser.parseWatchPage(html)
-
-        // Check playability
-        if (playerResponse.playabilityStatus?.isPlayable != true) {
-            val reason = playerResponse.playabilityStatus?.reason ?: "Unknown error"
-            throw VideoUnavailableException("Video '${videoId.value}' is unavailable: $reason")
-        }
-
-        // Get cipher manifest if needed
-        var cipherManifest: CipherManifest? = null
-
-        // Process streaming data
-        playerResponse.streamingData?.let { streamingData ->
-            // Pre-resolve cipher manifest once if any format will need decryption — avoids the
-            // race that would otherwise occur if multiple parallel formats hit the lazy
-            // initializer below simultaneously.
-            if (streamingData.allFormats.any { it.requiresDecryption }) {
-                cipherManifest = videoController.getCipherManifest()
-            }
-
-            // Process formats in parallel — each may issue HEAD + range-fetch verifications.
-            val resolvedCipher = cipherManifest
-            val processedFormats = coroutineScope {
-                streamingData.allFormats
-                    .map { format ->
-                        async {
-                            processFormat(format, resolvedCipher) {
-                                resolvedCipher
-                                    ?: videoController.getCipherManifest().also { cipherManifest = it }
-                            }
-                        }
-                    }
-                    .awaitAll()
-            }
-            streams.addAll(processedFormats.filterNotNull())
-
-            // Try to get DASH manifest streams
-            streamingData.dashManifestUrl?.let { dashUrl ->
-                try {
-                    val manifestXml = httpController.get(dashUrl)
-                    val dashStreams = dashParser.parse(manifestXml)
-                    streams.addAll(dashStreams)
-                } catch (e: Exception) {
-                    // DASH manifest might not be available, ignore
-                }
-            }
-        }
-
-        return streams
-    }
-
-    /**
      * Process a format that already has a plain URL (no cipher needed).
      * Used for Android client responses.
      */
@@ -425,12 +396,18 @@ class StreamClient internal constructor(
 
             // Video-only stream
             format.isVideoOnly || (videoCodec != null && audioCodec == null) -> {
-                if (width == null || height == null) return null
-
                 val quality = if (qualityLabel != null) {
                     VideoQuality.fromLabel(qualityLabel, framerate)
                 } else {
                     VideoQuality.fromItag(itag, framerate)
+                }
+
+                // Upstream keeps streams with missing width/height, falling back to the
+                // quality's default resolution rather than dropping them (StreamClient.cs).
+                val resolution = if (width != null && height != null) {
+                    Resolution(width, height)
+                } else {
+                    quality.getDefaultResolution()
                 }
 
                 VideoOnlyStreamInfo(
@@ -440,19 +417,25 @@ class StreamClient internal constructor(
                     bitrate = Bitrate(bitrate),
                     videoCodec = videoCodec ?: "unknown",
                     videoQuality = quality,
-                    videoResolution = Resolution(width, height),
+                    videoResolution = resolution,
                     isVideoUpscaled = format.isVideoUpscaled
                 )
             }
 
             // Muxed stream (both audio and video)
             videoCodec != null && audioCodec != null -> {
-                if (width == null || height == null) return null
-
                 val quality = if (qualityLabel != null) {
                     VideoQuality.fromLabel(qualityLabel, framerate)
                 } else {
                     VideoQuality.fromItag(itag, framerate)
+                }
+
+                // Upstream keeps streams with missing width/height, falling back to the
+                // quality's default resolution rather than dropping them (StreamClient.cs).
+                val resolution = if (width != null && height != null) {
+                    Resolution(width, height)
+                } else {
+                    quality.getDefaultResolution()
                 }
 
                 MuxedStreamInfo(
@@ -467,7 +450,7 @@ class StreamClient internal constructor(
                     isAudioLanguageDefault = format.isDefaultAudioTrack.takeIf { it },
                     videoCodec = videoCodec,
                     videoQuality = quality,
-                    videoResolution = Resolution(width, height),
+                    videoResolution = resolution,
                     isVideoUpscaled = format.isVideoUpscaled
                 )
             }
@@ -540,12 +523,18 @@ class StreamClient internal constructor(
 
             // Video-only stream
             format.isVideoOnly || (videoCodec != null && audioCodec == null) -> {
-                if (width == null || height == null) return null
-
                 val quality = if (qualityLabel != null) {
                     VideoQuality.fromLabel(qualityLabel, framerate)
                 } else {
                     VideoQuality.fromItag(itag, framerate)
+                }
+
+                // Upstream keeps streams with missing width/height, falling back to the
+                // quality's default resolution rather than dropping them (StreamClient.cs).
+                val resolution = if (width != null && height != null) {
+                    Resolution(width, height)
+                } else {
+                    quality.getDefaultResolution()
                 }
 
                 VideoOnlyStreamInfo(
@@ -555,19 +544,25 @@ class StreamClient internal constructor(
                     bitrate = Bitrate(bitrate),
                     videoCodec = videoCodec ?: "unknown",
                     videoQuality = quality,
-                    videoResolution = Resolution(width, height),
+                    videoResolution = resolution,
                     isVideoUpscaled = format.isVideoUpscaled
                 )
             }
 
             // Muxed stream (both audio and video)
             videoCodec != null && audioCodec != null -> {
-                if (width == null || height == null) return null
-
                 val quality = if (qualityLabel != null) {
                     VideoQuality.fromLabel(qualityLabel, framerate)
                 } else {
                     VideoQuality.fromItag(itag, framerate)
+                }
+
+                // Upstream keeps streams with missing width/height, falling back to the
+                // quality's default resolution rather than dropping them (StreamClient.cs).
+                val resolution = if (width != null && height != null) {
+                    Resolution(width, height)
+                } else {
+                    quality.getDefaultResolution()
                 }
 
                 MuxedStreamInfo(
@@ -582,7 +577,7 @@ class StreamClient internal constructor(
                     isAudioLanguageDefault = format.isDefaultAudioTrack.takeIf { it },
                     videoCodec = videoCodec,
                     videoQuality = quality,
-                    videoResolution = Resolution(width, height),
+                    videoResolution = resolution,
                     isVideoUpscaled = format.isVideoUpscaled
                 )
             }

@@ -2,8 +2,11 @@ package com.github.kotlintubeexplode.internal.dto
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 /**
  * DTO for playlist browse API response.
@@ -42,7 +45,7 @@ data class PlaylistNextResponseDto(
 
     val isAvailable: Boolean get() = playlistRoot != null
 
-    val title: String? get() = playlistRoot?.title
+    val title: String? get() = playlistRoot?.titleText
 
     val authorName: String? get() = playlistRoot?.ownerName?.simpleText
 
@@ -69,10 +72,30 @@ data class NextPlaylistContainerDto(
 
 @Serializable
 data class PlaylistPanelDto(
-    @SerialName("title") val title: String? = null,
+    @SerialName("title") val title: JsonElement? = null,
     @SerialName("ownerName") val ownerName: TextRunsDto? = null,
     @SerialName("contents") val contents: List<PlaylistPanelEntryDto> = emptyList()
-)
+) {
+    /**
+     * Panel title read defensively. YouTube normally sends a bare string here, but has a long
+     * history of migrating string fields to {simpleText}/{runs} objects. Reading it as a raw
+     * JsonElement keeps an unexpected shape from failing deserialization of the entire Next
+     * response — which would wipe out every video in the batch. Mirrors upstream's GetStringOrNull
+     * tolerance (null on non-string), and goes one step further by extracting simpleText/runs.
+     */
+    val titleText: String?
+        get() = when (val t = title) {
+            null -> null
+            is JsonPrimitive -> if (t.isString) t.contentOrNull else null
+            is JsonObject ->
+                (t["simpleText"] as? JsonPrimitive)?.contentOrNull
+                    ?: (t["runs"] as? JsonArray)
+                        ?.mapNotNull { ((it as? JsonObject)?.get("text") as? JsonPrimitive)?.contentOrNull }
+                        ?.joinToString("")
+                        ?.takeIf { it.isNotEmpty() }
+            else -> null
+        }
+}
 
 @Serializable
 data class PlaylistPanelEntryDto(
@@ -111,7 +134,30 @@ data class PlaylistPanelVideoRendererDto(
     val authorName: String? get() = authorRun?.text
 
     val authorChannelId: String?
-        get() = authorRun?.navigationEndpoint?.browseEndpoint?.browseId
+        get() {
+            // Primary path (single-author videos): first byline run -> browseEndpoint.browseId.
+            authorRun?.navigationEndpoint?.browseEndpoint?.browseId?.let { return it }
+            // Fallback (multi-author videos, e.g. music tracks with featured artists): the uploader
+            // channel link is hidden behind a "..." dialog instead of a plain browseEndpoint. Mirror
+            // upstream PlaylistVideoData.ChannelId's second branch: dialog view-model -> first list
+            // item -> onTap -> browseId. Fully null-guarded; if the shape shifts this returns null
+            // and the caller's skip-on-missing (PlaylistClient) still applies (no throw).
+            var current: JsonElement? = authorRun?.navigationEndpoint?.showDialogCommand
+            for (key in listOf(
+                "panelLoadingStrategy", "inlineContent", "dialogViewModel",
+                "customContent", "listViewModel", "listItems", "0",
+                "listItemViewModel", "rendererContext", "commandContext",
+                "onTap", "innertubeCommand", "browseEndpoint", "browseId"
+            )) {
+                current = when (val c = current) {
+                    is JsonObject -> c[key]
+                    is JsonArray -> key.toIntOrNull()?.let { c.getOrNull(it) }
+                    else -> null
+                }
+                if (current == null) return null
+            }
+            return (current as? JsonPrimitive)?.content
+        }
 
     val index: Int? get() = navigationEndpoint?.watchEndpoint?.index
 
@@ -167,7 +213,10 @@ data class NavigationEndpointDto(
     val browseEndpoint: BrowseEndpointDto? = null,
 
     @SerialName("watchEndpoint")
-    val watchEndpoint: WatchEndpointDto? = null
+    val watchEndpoint: WatchEndpointDto? = null,
+
+    @SerialName("showDialogCommand")
+    val showDialogCommand: JsonElement? = null
 )
 
 @Serializable

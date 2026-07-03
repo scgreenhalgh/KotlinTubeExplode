@@ -159,7 +159,8 @@ value class UserName(val value: String) {
 /**
  * Represents a YouTube channel slug (custom URL format).
  *
- * Channel slugs can contain alphanumeric characters, hyphens, underscores, and dots.
+ * Channel slugs contain letters or digits only (Unicode-aware), matching upstream's
+ * `char.IsLetterOrDigit` rule.
  */
 @JvmInline
 value class ChannelSlug(val value: String) {
@@ -175,7 +176,7 @@ value class ChannelSlug(val value: String) {
         private const val MAX_INPUT_LENGTH = 2048
 
         private fun isValidSlug(slug: String): Boolean =
-            slug.isNotEmpty() && slug.all { it.isLetterOrDigit() || it == '-' || it == '_' || it == '.' }
+            slug.isNotEmpty() && slug.all { it.isLetterOrDigit() }
 
         private fun urlDecode(value: String): String = try {
             URLDecoder.decode(value, "UTF-8")
