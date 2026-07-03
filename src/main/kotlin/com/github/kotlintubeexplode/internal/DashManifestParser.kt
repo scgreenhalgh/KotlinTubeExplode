@@ -56,6 +56,11 @@ internal class DashManifestParser {
         val baseUrl = element.getElementsByTagName("BaseURL")
             .item(0)?.textContent ?: return null
 
+        // SSRF guard: a DASH manifest is attacker-influenceable content; never emit a stream URL
+        // outside the Google trust boundary — the downloader would later fetch it. Mirrors the
+        // verifyStreamUrl guard applied to the non-DASH formats.
+        if (!isGoogleHttpsUrl(baseUrl)) return null
+
         // Parse content length from URL or attribute
         val contentLength = parseContentLength(baseUrl, element)
 

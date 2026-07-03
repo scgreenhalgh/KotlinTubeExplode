@@ -123,5 +123,61 @@ class PlaylistPanelVideoRendererDtoTest {
             // Before the fix authorChannelId is null (no dialog fallback) -> this assertion FAILS.
             dto.authorChannelId shouldBe "UCdeepfallback123"
         }
+
+        @Test
+        fun `returns null when the dialog-fallback browseId is explicit JSON null`() {
+            // Same dialog shape as above, but the terminal browseId is an explicit JSON null.
+            // JsonNull is itself a JsonPrimitive whose .content is the string "null", so the naive
+            // (current as? JsonPrimitive)?.content leaks the literal "null" as a channel id.
+            val raw = """
+                {
+                  "videoId": "abc123",
+                  "title": { "simpleText": "Multi-author track" },
+                  "longBylineText": {
+                    "runs": [
+                      {
+                        "text": "Featured Artist",
+                        "navigationEndpoint": {
+                          "showDialogCommand": {
+                            "panelLoadingStrategy": {
+                              "inlineContent": {
+                                "dialogViewModel": {
+                                  "customContent": {
+                                    "listViewModel": {
+                                      "listItems": [
+                                        {
+                                          "listItemViewModel": {
+                                            "rendererContext": {
+                                              "commandContext": {
+                                                "onTap": {
+                                                  "innertubeCommand": {
+                                                    "browseEndpoint": { "browseId": null }
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+            """.trimIndent()
+
+            val dto = json.decodeFromString<PlaylistPanelVideoRendererDto>(raw)
+
+            // Sanity: the walk reaches the terminal node; only the value is JSON null.
+            dto.authorName shouldBe "Featured Artist"
+            // Pre-fix: JsonNull.content == "null", so authorChannelId is the string "null" -> FAILS.
+            dto.authorChannelId shouldBe null
+        }
     }
 }

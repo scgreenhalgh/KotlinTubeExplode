@@ -3,8 +3,11 @@ package com.github.kotlintubeexplode.internal.cipher
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
+import org.junit.jupiter.api.Assertions.assertTimeoutPreemptively
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import java.time.Duration
 
 class PlayerScriptParserTest {
 
@@ -89,6 +92,65 @@ class PlayerScriptParserTest {
         fun `should handle empty signature`() {
             val manifest = CipherManifest("1000", emptyList())
             manifest.decipher("") shouldBe ""
+        }
+    }
+
+    @Nested
+    inner class ReDoSGuardTests {
+        @Test
+        fun `should not hang on a pathologically crafted player script`() {
+            // A valid sts (so parsing proceeds past the timestamp) followed by ~3.5MB of decipher
+            // function *prefixes* that never terminate with `return b.join("")` — sized just under
+            // the parser's script cap so it exercises the per-anchor BODY BOUND, not the size
+            // rejection. With a tight bound the near-cap input fails fast; a loose bound (or the old
+            // unbounded capture) spends tens of seconds here (~23s at 3.5MB with a 30k bound).
+            val pathological = "sts:12345;" + "a=function(b){b=b.split(\"\");zzz;".repeat(113_000)
+            assertTimeoutPreemptively(Duration.ofSeconds(5)) {
+                runCatching { parser.parse(pathological) }
+            }
+        }
+
+        @Test
+        fun `should not hang on a container-name flood`() {
+            // A valid decipher fn whose body references a 1-char container name "Z", followed by
+            // ~3.5MB of unclosed `Z={aa` prefixes (just under the cap). The old container regex
+            // (find + lazy body capture over the whole script) backtracks catastrophically here
+            // (~68s); a linear brace-scan resolves it in ms (no balanced container -> not found).
+            val decipher = "abc=function(a){a=a.split(\"\");Z.d(a,3);return a.join(\"\")};"
+            val pathological = "sts:12345;" + decipher + "Z={aa".repeat(700_000)
+            assertTimeoutPreemptively(Duration.ofSeconds(5)) {
+                runCatching { parser.parse(pathological) }
+            }
+        }
+
+        @Test
+        fun `should not hang on a word-run in the decipher-function name position`() {
+            // The decipher pattern's leading `([$\w]+)=` is run over the FULL script by find(). A
+            // long word-run (no `=`) makes the greedy name group scan+backtrack the whole run at
+            // every start position -> O(n^2) (~72s at 100KB). Bounding the name quantifier fixes it.
+            val pathological = "sts:12345;" + "z".repeat(100_000)
+            assertTimeoutPreemptively(Duration.ofSeconds(5)) {
+                runCatching { parser.parse(pathological) }
+            }
+        }
+
+        @Test
+        fun `should not hang on a word-run inside the cipher container body`() {
+            // parseFunctionMap's SWAP/SPLICE/REVERSE patterns share the same leading `([$\w]+):`
+            // name group; a word-run in the container body blows them up O(n^2) (~54s each). The
+            // container-body cap plus the bounded name quantifier keep it fast.
+            val decipher = "Z=function(a){a=a.split(\"\");Z.d(a,3);return a.join(\"\")};"
+            val pathological = "sts:12345;" + decipher + "Z={A:function(a,b){" + "z".repeat(98_000) + "}}"
+            assertTimeoutPreemptively(Duration.ofSeconds(5)) {
+                runCatching { parser.parse(pathological) }
+            }
+        }
+
+        @Test
+        fun `should reject an oversized player script instead of scanning it`() {
+            val huge = " ".repeat(11 * 1024 * 1024) // 11MB, above the parse cap
+            val ex = shouldThrow<CipherParseException> { parser.parse(huge) }
+            ex.message shouldContain "too large"
         }
     }
 }

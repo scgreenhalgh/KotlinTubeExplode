@@ -87,4 +87,35 @@ class ChannelClientTest {
             channel.thumbnails.shouldNotBeEmpty()
         }
     }
+
+    @Nested
+    @DisplayName("title-tag HTML entity decoding")
+    inner class TitleTagEntityTests {
+
+        // A channel page with a resolvable og:url but NO og:title, so extractTitle falls through
+        // to the <title> tag. The <title> carries HTML entities that must be decoded — the DOM
+        // parser only decodes og: meta values, never the raw <title> regex fallback.
+        private val titleEntityPage = """
+            <html><head>
+            <meta property="og:url" content="https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw">
+            <title>Google &#39;Dev&#39; Team - YouTube</title>
+            </head><body></body></html>
+        """.trimIndent()
+
+        @Test
+        fun `decodes HTML entities in the title-tag fallback`() = runTest {
+            val http = mockk<HttpController>()
+            val playlists = mockk<PlaylistClient>(relaxed = true)
+
+            coEvery { http.getWithRetry(any(), any()) } returns titleEntityPage
+
+            val client = ChannelClient(http, playlists)
+
+            val channel = client.getByHandle("@GoogleDevelopers")
+
+            // Pre-fix the <title> fallback returns the raw "Google &#39;Dev&#39; Team" (entities
+            // never decoded); post-fix decodeHtmlEntities turns the numeric refs into apostrophes.
+            channel.title shouldBe "Google 'Dev' Team"
+        }
+    }
 }

@@ -4,6 +4,7 @@ import com.github.kotlintubeexplode.exceptions.RequestLimitExceededException
 import okhttp3.CertificatePinner
 import okhttp3.Cookie
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.MediaType.Companion.toMediaType
@@ -72,50 +73,71 @@ internal class HttpController(
         const val MAX_SERVER_ERROR_RETRIES = 5
 
         /**
-         * Certificate pinner for YouTube and Google Video domains.
-         *
-         * Pins to Google Trust Services root certificates to prevent MITM attacks.
-         * These are the SPKI (Subject Public Key Info) SHA-256 hashes for:
-         * - GTS Root R1 (primary)
-         * - GTS Root R2 (backup)
-         * - GlobalSign Root CA (legacy backup)
-         *
-         * Note: If certificate pinning causes issues (e.g., corporate proxies),
-         * you can provide your own OkHttpClient without pinning.
+         * Maximum size (bytes) for an in-memory response body read by get()/postJson().
+         * Real YouTube responses (watch HTML, youtubei JSON, DASH/caption XML, base.js) are a few
+         * MB at most; a body larger than this is refused before it is fully buffered, so a malicious
+         * or MITM response advertising a huge/endless body can't OOM the process. Streams are read
+         * incrementally via getStream() and are unaffected.
          */
-        val certificatePinner: CertificatePinner = CertificatePinner.Builder()
-            // YouTube and related domains
-            .add("*.youtube.com", "sha256/hxqRlPTu1bMS/0DITB1SSu0vd4u/8l8TjPgfaAp63Gc=") // GTS Root R1
-            .add("*.youtube.com", "sha256/Vfd95BwDeSQo+NUYxVEEb6lqYFPlgS1ygRtH+WhFcSg=") // GTS Root R2
-            .add("*.youtube.com", "sha256/iie1VXtL7HzAMF+/PVPR9xzT80kQxdZeJ+zduCB3uj0=") // GlobalSign Root CA
-            .add("youtube.com", "sha256/hxqRlPTu1bMS/0DITB1SSu0vd4u/8l8TjPgfaAp63Gc=")
-            .add("youtube.com", "sha256/Vfd95BwDeSQo+NUYxVEEb6lqYFPlgS1ygRtH+WhFcSg=")
-            .add("youtube.com", "sha256/iie1VXtL7HzAMF+/PVPR9xzT80kQxdZeJ+zduCB3uj0=")
-            // Google Video CDN (where streams are served from)
-            .add("*.googlevideo.com", "sha256/hxqRlPTu1bMS/0DITB1SSu0vd4u/8l8TjPgfaAp63Gc=")
-            .add("*.googlevideo.com", "sha256/Vfd95BwDeSQo+NUYxVEEb6lqYFPlgS1ygRtH+WhFcSg=")
-            .add("*.googlevideo.com", "sha256/iie1VXtL7HzAMF+/PVPR9xzT80kQxdZeJ+zduCB3uj0=")
-            // Google APIs (for youtubei endpoints)
-            .add("*.googleapis.com", "sha256/hxqRlPTu1bMS/0DITB1SSu0vd4u/8l8TjPgfaAp63Gc=")
-            .add("*.googleapis.com", "sha256/Vfd95BwDeSQo+NUYxVEEb6lqYFPlgS1ygRtH+WhFcSg=")
-            .add("*.googleapis.com", "sha256/iie1VXtL7HzAMF+/PVPR9xzT80kQxdZeJ+zduCB3uj0=")
-            .build()
+        internal const val MAX_RESPONSE_BYTES = 64L * 1024 * 1024
 
         /**
-         * Singleton OkHttpClient instance with sensible defaults.
-         * Using a singleton ensures connection pooling is effective.
-         * Includes certificate pinning for YouTube domains to prevent MITM attacks.
+         * Certificate pinner for the YouTube / Google hosts the library talks to.
+         *
+         * Pins the SPKI SHA-256 hashes of Google's current + backup trust anchors (Google Trust
+         * Services roots R1–R4 plus the cross-signing GlobalSign Root CA). OkHttp matches a pin
+         * against the validated chain's trust anchor, so pinning the roots survives leaf/intermediate
+         * rotation; the multiple roots survive a root rotation. Verified against the live youtube.com
+         * and googlevideo.com chains.
+         *
+         * Note: if pinning conflicts with a corporate TLS-inspection proxy, supply your own
+         * OkHttpClient (see YoutubeClient) — that path is not pinned.
+         *
+         * Rotation policy: when Google rotates a root, add the new SPKI pin here BEFORE they cut over
+         * (keep the old one until retired) and let HttpsPinningIntegrationTest catch a stale set.
          */
-        val defaultClient: OkHttpClient by lazy {
-            OkHttpClient.Builder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
-                .writeTimeout(30, TimeUnit.SECONDS)
-                .followRedirects(true)
-                .followSslRedirects(true)
-                .certificatePinner(certificatePinner)
-                .build()
+        val certificatePinner: CertificatePinner = CertificatePinner.Builder().apply {
+            val googleRoots = arrayOf(
+                "sha256/hxqRlPTu1bMS/0DITB1SSu0vd4u/8l8TjPgfaAp63Gc=", // GTS Root R1
+                "sha256/Vfd95BwDeSQo+NUYxVEEIlvkOlWY2SalKK1lPhzOx78=", // GTS Root R2
+                "sha256/QXnt2YHvdHR3tJYmQIr0Paosp6t/nggsEGD4QJZ3Q0g=", // GTS Root R3
+                "sha256/mEflZT5enoR1FuXLgYYGqnVEoZvmf9c2bVBpiOjYQ0c=", // GTS Root R4
+                "sha256/K87oWBWM9UZfyddvDfoxL+8lpNyoUB2ptGtn0fv6G2Q=", // GlobalSign Root CA
+            )
+            for (host in listOf("*.youtube.com", "youtube.com", "*.googlevideo.com", "*.googleapis.com")) {
+                add(host, *googleRoots)
+            }
+        }.build()
+
+        /**
+         * Strips Cookie + Authorization when a request (including a redirect hop) targets a host
+         * outside the Google trust boundary, so a cross-host 302 can't carry the user's SAPISID
+         * session off-site. A network interceptor so it sees every redirect hop.
+         */
+        val credentialStrippingInterceptor: Interceptor = Interceptor { chain ->
+            chain.proceed(enforceTrustBoundaryOrThrow(chain.request()))
         }
+
+        /**
+         * Builds an OkHttpClient with the library's security defaults: certificate pinning to the
+         * Google roots AND the cross-host credential-stripping network interceptor. Both
+         * [defaultClient] and YoutubeClient's owned client use this, so the shipped default path is
+         * actually pinned (it previously built a bare, unpinned client and bypassed the pins).
+         */
+        fun newSecureClientBuilder(): OkHttpClient.Builder = OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .certificatePinner(certificatePinner)
+            .addNetworkInterceptor(credentialStrippingInterceptor)
+
+        /**
+         * Singleton OkHttpClient with the library's security defaults (see [newSecureClientBuilder]).
+         * A singleton keeps connection pooling effective.
+         */
+        val defaultClient: OkHttpClient by lazy { newSecureClientBuilder().build() }
     }
 
     /**
@@ -307,8 +329,14 @@ internal class HttpController(
             .header("Accept-Language", DEFAULT_ACCEPT_LANGUAGE)
             .header("Origin", "${httpUrl.scheme}://${httpUrl.host}")
 
-        buildCookieHeader(httpUrl.host)?.let { builder.header("Cookie", it) }
-        tryGenerateAuthHeader(preparedUrl)?.let { builder.header("Authorization", it) }
+        // Only attach credentials over TLS. A malicious/compromised YouTube response can hand back
+        // an http:// youtube.com URL (e.g. a caption baseUrl); cert pinning does not cover a fresh
+        // cleartext request, so sending the SAPISID cookie + SAPISIDHASH there would leak the user's
+        // Google session to any passive on-path observer.
+        if (httpUrl.isHttps) {
+            buildCookieHeader(httpUrl.host)?.let { builder.header("Cookie", it) }
+            tryGenerateAuthHeader(preparedUrl)?.let { builder.header("Authorization", it) }
+        }
         extraHeaders.forEach { (k, v) -> builder.header(k, v) }
 
         return preparedUrl to builder
@@ -361,9 +389,28 @@ internal class HttpController(
                 throw HttpException(resp.code, resp.message, request.url.toString())
             }
 
-            resp.body?.string()
-                ?: throw IOException("Empty response body from ${request.url}")
+            readCappedBody(resp, request.url.toString())
         }
+    }
+
+    /**
+     * Reads a response body fully into a String, but refuses one larger than [MAX_RESPONSE_BYTES]
+     * so a malicious/MITM response can't exhaust memory. Rejects an over-cap advertised
+     * Content-Length up front, and bounds the buffered bytes for chunked/unknown-length bodies.
+     */
+    private fun readCappedBody(response: okhttp3.Response, url: String): String {
+        val body = response.body ?: throw IOException("Empty response body from $url")
+        val advertised = body.contentLength()
+        if (advertised > MAX_RESPONSE_BYTES) {
+            throw IOException("Response body from $url is too large ($advertised bytes)")
+        }
+        val source = body.source()
+        // Buffer at most cap+1 bytes so an unknown-length (chunked) body can't blow up memory.
+        source.request(MAX_RESPONSE_BYTES + 1)
+        if (source.buffer.size > MAX_RESPONSE_BYTES) {
+            throw IOException("Response body from $url exceeds the ${MAX_RESPONSE_BYTES}-byte cap")
+        }
+        return source.readString(Charsets.UTF_8)
     }
 
     /**

@@ -12,7 +12,6 @@ import com.github.kotlintubeexplode.videos.closedcaptions.ClosedCaptionClient
 import com.github.kotlintubeexplode.videos.streams.StreamClient
 import okhttp3.OkHttpClient
 import java.io.Closeable
-import java.util.concurrent.TimeUnit
 
 /**
  * Main entry point for the KotlinTubeExplode library.
@@ -72,13 +71,10 @@ class YoutubeClient(
      * If no client was provided, we create our own that we'll dispose on close().
      */
     private val ownedClient: OkHttpClient? = if (httpClient == null) {
-        OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
-            .followRedirects(true)
-            .followSslRedirects(true)
-            .build()
+        // Use the library's secure default builder (certificate pinning + cross-host credential
+        // stripping). Previously this built a bare, UNPINNED client, so the advertised pinning was
+        // silently bypassed on the normal `YoutubeClient()` path.
+        HttpController.newSecureClientBuilder().build()
     } else {
         null // User provided their own client, we don't own it
     }

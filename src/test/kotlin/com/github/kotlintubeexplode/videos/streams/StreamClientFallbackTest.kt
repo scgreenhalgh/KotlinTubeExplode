@@ -1,6 +1,7 @@
 package com.github.kotlintubeexplode.videos.streams
 
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.VideoUnavailableException
 import com.github.kotlintubeexplode.internal.HttpController
 import com.github.kotlintubeexplode.internal.VideoController
 import com.github.kotlintubeexplode.internal.cipher.CipherManifest
@@ -9,7 +10,9 @@ import com.github.kotlintubeexplode.internal.dto.PlayerResponseDto
 import com.github.kotlintubeexplode.internal.dto.StreamFormatDto
 import com.github.kotlintubeexplode.internal.dto.StreamingDataDto
 import com.github.kotlintubeexplode.internal.dto.VideoDetailsDto
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.collections.shouldHaveSize
+import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.types.shouldBeInstanceOf
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -77,6 +80,38 @@ class StreamClientFallbackTest {
             manifest.streams shouldHaveSize 1
             manifest.streams.first().shouldBeInstanceOf<AudioOnlyStreamInfo>()
             coVerify(exactly = 1) { videoController.getPlayerResponseViaTVEmbeddedClient(any(), any()) }
+        }
+    }
+
+    @Nested
+    @DisplayName("cipher-less client reports the video unavailable")
+    inner class UnavailableTests {
+
+        @Test
+        fun `should throw VideoUnavailableException carrying the reason for an unavailable video`() = runTest {
+            val http = mockk<HttpController>()
+            val videoController = mockk<VideoController>()
+
+            // Android (cipher-less) client: status "error" + no videoDetails => isAvailable == false
+            // (deleted / private / region-blocked), carrying the real reason. Upstream surfaces this
+            // as the specific VideoUnavailableException with the reason, not a generic "no streams".
+            val androidResponse = PlayerResponseDto(
+                playabilityStatus = PlayabilityStatusDto(status = "error", reason = "This video is private"),
+                videoDetails = null,
+                streamingData = StreamingDataDto()
+            )
+            coEvery { videoController.getPlayerResponseViaAndroidClient(any(), any()) } returns androidResponse
+
+            // An unavailable video must NOT trigger the TV-embedded fallback or the dead web path.
+            coEvery { videoController.getCipherManifest() } returns CipherManifest.EMPTY
+            coEvery { http.getWithRetry(any(), any(), any()) } throws
+                IOException("web-client fallback should not be reached")
+
+            val streamClient = StreamClient(http, videoController)
+
+            val ex = shouldThrow<VideoUnavailableException> { streamClient.getManifest(videoId) }
+            ex.message shouldContain "This video is private"
+            coVerify(exactly = 0) { videoController.getPlayerResponseViaTVEmbeddedClient(any(), any()) }
         }
     }
 }

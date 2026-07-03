@@ -1,6 +1,8 @@
 package com.github.kotlintubeexplode.search
 
 import com.github.kotlintubeexplode.internal.HttpController
+import io.kotest.assertions.throwables.shouldNotThrowAny
+import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
 import io.mockk.mockk
@@ -8,8 +10,10 @@ import io.mockk.slot
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -188,6 +192,35 @@ class SearchClientTest {
 
             results.size shouldBe 1
             results[0].id.value shouldBe "PLtest1234567"
+        }
+    }
+
+    @Nested
+    @DisplayName("findAllByKey recursion depth guard")
+    inner class RecursionDepthGuardTests {
+
+        // Build the nesting iteratively so constructing the fixture stays O(1) on the stack; only
+        // the walker recurses. This lets us drive the walker far past any real JSON nesting depth.
+        private fun deeplyNested(depth: Int): JsonObject {
+            var current: JsonElement = buildJsonObject { }
+            repeat(depth) {
+                val child = current
+                current = buildJsonObject { put("wrapper", child) }
+            }
+            return current.jsonObject
+        }
+
+        @Test
+        fun `does not blow the stack on a pathologically nested response`() {
+            val client = SearchClient(mockk<HttpController>(relaxed = true))
+            val deep = deeplyNested(50_000)
+
+            // Pre-fix findAllByKeyRecursive descends every level unbounded -> StackOverflowError,
+            // which shouldNotThrowAny reports as a failure. Post-fix the depth guard stops
+            // descending past the bound and returns cleanly.
+            val results = shouldNotThrowAny { with(client) { deep.findAllByKey("videoRenderer") } }
+
+            results.shouldBeEmpty()
         }
     }
 }

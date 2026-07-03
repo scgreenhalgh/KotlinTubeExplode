@@ -20,6 +20,13 @@ internal class PlayerScriptParser {
 
     companion object {
         /**
+         * Player scripts (base.js) are legitimately ~2 MB. A response far larger than that is
+         * either broken or a ReDoS attempt, so it is refused before the backtracking decipher/
+         * container regexes ever run on it.
+         */
+        internal const val MAX_PLAYER_SCRIPT_LENGTH = 4 * 1024 * 1024
+
+        /**
          * Pattern to find signature timestamp.
          * Matches: signatureTimestamp:12345 or sts:12345
          */
@@ -34,14 +41,14 @@ internal class PlayerScriptParser {
          * Example: function(a){a=a.split("");Xy.Dz(a,3);Xy.Tk(a,45);return a.join("")}
          */
         private val DECIPHER_FUNCTION_PATTERN = Regex(
-            """([$\w]+)\s*=\s*function\s*\(\s*[$\w]+\s*\)\s*\{\s*([$\w]+)\s*=\s*\2\.split\s*\(\s*""\s*\)\s*;(.+?)return\s+\2\.join\s*\(\s*""\s*\)\s*\}"""
+            """([$\w]{1,40})\s*=\s*function\s*\(\s*[$\w]{1,40}\s*\)\s*\{\s*([$\w]{1,40})\s*=\s*\2\.split\s*\(\s*""\s*\)\s*;(.{1,2000}?)return\s+\2\.join\s*\(\s*""\s*\)\s*\}"""
         )
 
         /**
          * Alternative pattern for decipher function.
          */
         private val DECIPHER_FUNCTION_PATTERN_ALT = Regex(
-            """function\s+([$\w]+)\s*\(\s*[$\w]+\s*\)\s*\{\s*([$\w]+)\s*=\s*\2\.split\s*\(\s*""\s*\)\s*;(.+?)return\s+\2\.join\s*\(\s*""\s*\)\s*\}"""
+            """function\s+([$\w]{1,40})\s*\(\s*[$\w]{1,40}\s*\)\s*\{\s*([$\w]{1,40})\s*=\s*\2\.split\s*\(\s*""\s*\)\s*;(.{1,2000}?)return\s+\2\.join\s*\(\s*""\s*\)\s*\}"""
         )
 
         /**
@@ -49,24 +56,22 @@ internal class PlayerScriptParser {
          * Matches: Xy.Dz(a,3) or Xy["Dz"](a,3)
          */
         private val CONTAINER_NAME_PATTERN = Regex(
-            """([$\w]+)(?:\.|(?:\[["']))[$\w]+(?:["']\])?\s*\(\s*[$\w]+\s*,\s*\d+\s*\)"""
+            """([$\w]{1,40})(?:\.|(?:\[["']))[$\w]{1,40}(?:["']\])?\s*\(\s*[$\w]{1,40}\s*,\s*\d+\s*\)"""
         )
 
         /**
-         * Pattern to find the cipher container object definition.
-         * Matches: var Xy={Dz:function(a,b){...},Tk:function(a){...}};
+         * Upper bound on a cipher container body length for the brace-scan in
+         * [findContainerDefinition]. Real containers are a few KB; this caps a pathological or
+         * garbage container (and the forward scan).
          */
-        private fun cipherContainerPattern(name: String) = Regex(
-            """(?:var\s+)?${Regex.escape(name)}\s*=\s*\{(.+?)\};""",
-            RegexOption.DOT_MATCHES_ALL
-        )
+        private const val MAX_CONTAINER_BODY_LENGTH = 20_000
 
         /**
          * Pattern to identify SWAP operation in function body.
          * Swap functions contain modulo (%) for index calculation.
          */
         private val SWAP_FUNCTION_PATTERN = Regex(
-            """([$\w]+)\s*:\s*function\s*\(\s*[$\w]+\s*,\s*[$\w]+\s*\)\s*\{[^}]*?%[^}]*?\}"""
+            """([$\w]{1,40})\s*:\s*function\s*\(\s*[$\w]{1,40}\s*,\s*[$\w]{1,40}\s*\)\s*\{[^}]*?%[^}]*?\}"""
         )
 
         /**
@@ -74,7 +79,7 @@ internal class PlayerScriptParser {
          * Splice functions remove elements from array.
          */
         private val SPLICE_FUNCTION_PATTERN = Regex(
-            """([$\w]+)\s*:\s*function\s*\(\s*[$\w]+\s*,\s*[$\w]+\s*\)\s*\{[^}]*?splice[^}]*?\}"""
+            """([$\w]{1,40})\s*:\s*function\s*\(\s*[$\w]{1,40}\s*,\s*[$\w]{1,40}\s*\)\s*\{[^}]*?splice[^}]*?\}"""
         )
 
         /**
@@ -82,7 +87,7 @@ internal class PlayerScriptParser {
          * Reverse functions have only one parameter and call reverse().
          */
         private val REVERSE_FUNCTION_PATTERN = Regex(
-            """([$\w]+)\s*:\s*function\s*\(\s*[$\w]+\s*\)\s*\{[^}]*?reverse[^}]*?\}"""
+            """([$\w]{1,40})\s*:\s*function\s*\(\s*[$\w]{1,40}\s*\)\s*\{[^}]*?reverse[^}]*?\}"""
         )
 
         /**
@@ -90,7 +95,7 @@ internal class PlayerScriptParser {
          * Matches: Xy.Dz(a,3) or Xy["Dz"](a,3)
          */
         private val FUNCTION_CALL_PATTERN = Regex(
-            """[$\w]+(?:\.|(?:\[["']))([$\w]+)(?:["']\])?\s*\(\s*[$\w]+\s*(?:,\s*(\d+)\s*)?\)"""
+            """[$\w]{1,40}(?:\.|(?:\[["']))([$\w]{1,40})(?:["']\])?\s*\(\s*[$\w]{1,40}\s*(?:,\s*(\d+)\s*)?\)"""
         )
     }
 
@@ -102,6 +107,14 @@ internal class PlayerScriptParser {
      * @throws CipherParseException if parsing fails
      */
     fun parse(playerScript: String): CipherManifest {
+        // Guard against ReDoS: real base.js is ~2 MB, so a far larger script is refused before the
+        // backtracking decipher/container regexes ever run on it.
+        if (playerScript.length > MAX_PLAYER_SCRIPT_LENGTH) {
+            throw CipherParseException(
+                "Player script is too large (${playerScript.length} bytes); refusing to parse."
+            )
+        }
+
         // Step 1: Extract signature timestamp
         val signatureTimestamp = extractSignatureTimestamp(playerScript)
             ?: throw CipherParseException("Could not find signature timestamp")
@@ -156,10 +169,34 @@ internal class PlayerScriptParser {
     }
 
     /**
-     * Finds the container object definition in the script.
+     * Finds the cipher container object body — `[var ]Name={ ... }` — returning the text between the
+     * outermost braces, or null if not found.
+     *
+     * A linear locate-then-brace-scan, NOT a backtracking regex. A `Name=\{(.{1,N}?)\};`-style
+     * find() over the whole (attacker-controlled) script is catastrophic: find() retries at every
+     * `Name={` and the lazy body scans up to N each time, so a script flooded with unclosed
+     * `Name={` prefixes costs O(script x N) (~78s at the size cap). This is O(script length).
      */
     private fun findContainerDefinition(playerScript: String, containerName: String): String? {
-        return cipherContainerPattern(containerName).find(playerScript)?.groupValues?.getOrNull(1)
+        // Cheap anchored locate of `[var ]Name = {` (no unbounded lazy capture).
+        val opener = Regex("""(?:var\s+)?${Regex.escape(containerName)}\s*=\s*\{""")
+        val bodyStart = opener.find(playerScript)?.range?.last?.plus(1) ?: return null
+
+        // Scan forward to the matching close brace, counting nesting; bounded body length.
+        var depth = 1
+        var i = bodyStart
+        val limit = minOf(playerScript.length, bodyStart + MAX_CONTAINER_BODY_LENGTH)
+        while (i < limit) {
+            when (playerScript[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return playerScript.substring(bodyStart, i)
+                }
+            }
+            i++
+        }
+        return null
     }
 
     /**

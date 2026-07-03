@@ -1,6 +1,7 @@
 package com.github.kotlintubeexplode.videos.streams
 
 import com.github.kotlintubeexplode.internal.HttpController
+import com.github.kotlintubeexplode.internal.isGoogleHttpsUrl
 
 /**
  * Verifies that a stream URL is fetchable and returns its content length.
@@ -27,6 +28,10 @@ internal suspend fun verifyStreamUrl(
     url: String,
     providedContentLength: Long?
 ): Long? {
+    // SSRF guard: a stream URL comes from a (possibly malicious/MITM) player response. Never
+    // HEAD/GET one outside the Google trust boundary — drop it from the manifest instead.
+    if (!isGoogleHttpsUrl(url)) return null
+
     val contentLength = providedContentLength
         ?: httpController.getContentLength(url)
         ?: return null

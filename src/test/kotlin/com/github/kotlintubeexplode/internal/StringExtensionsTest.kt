@@ -1,6 +1,7 @@
 package com.github.kotlintubeexplode.internal
 
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldNotContain
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.nulls.shouldNotBeNull
 import org.junit.jupiter.api.DisplayName
@@ -339,6 +340,21 @@ class StringExtensionsTest {
             // is `passwd`), but only the final segment is sanitized. This proves the
             // contract: basename only, NOT directory canonicalization.
             result.name shouldBe "passwd"
+        }
+    }
+
+    @Nested
+    @DisplayName("safeFileIn")
+    inner class SafeFileInTests {
+        @Test
+        fun `confines an untrusted traversal filename to the directory`() {
+            val dir = java.io.File("/base/downloads")
+            // An attacker-controlled title (from YouTube metadata) with separators + dot-dot.
+            val result = safeFileIn(dir, "../../etc/passwd")
+            // Must stay inside `dir`: parent is exactly `dir`, and the name carries no separators.
+            result.parentFile shouldBe dir
+            result.name shouldNotContain "/"
+            result.name shouldNotContain "\\"
         }
     }
 

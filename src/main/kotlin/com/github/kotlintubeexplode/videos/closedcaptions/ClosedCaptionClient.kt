@@ -5,6 +5,8 @@ import com.github.kotlintubeexplode.core.VideoId
 import com.github.kotlintubeexplode.internal.HttpController
 import com.github.kotlintubeexplode.internal.VideoController
 import com.github.kotlintubeexplode.internal.dto.ClosedCaptionTrackResponseDto
+import com.github.kotlintubeexplode.internal.requireGoogleHttpsUrl
+import com.github.kotlintubeexplode.internal.safeFileIn
 import com.github.kotlintubeexplode.internal.setQueryParameter
 import com.github.kotlintubeexplode.internal.toSafeFilePath
 import java.io.File
@@ -73,7 +75,7 @@ class ClosedCaptionClient internal constructor(
         // than append-if-absent. Matches upstream's SetQueryParameter behavior.
         val url = trackInfo.url.setQueryParameter("format", "3").setQueryParameter("fmt", "3")
 
-        val xml = httpController.get(url)
+        val xml = httpController.get(requireGoogleHttpsUrl(url))
         val response = ClosedCaptionTrackResponseDto.parse(xml)
 
         val captions = response.captions.mapNotNull { captionData ->
@@ -138,8 +140,9 @@ class ClosedCaptionClient internal constructor(
         filePath: String,
         onProgress: ((Double) -> Unit)? = null
     ) {
-        // Sanitize basename only (preserves caller-controlled directory). Defends against
-        // user-derived filename patterns where caption titles may contain unsafe chars.
+        // Cleans only the basename. NOTE: does NOT make an arbitrary caller-built path
+        // traversal-safe — a caption title containing `/../` in `filePath` can still escape.
+        // For untrusted titles, prefer the downloadSrt(trackInfo, directory, fileName) overload.
         val file = toSafeFilePath(filePath)
 
         if (file.exists() && file.isDirectory) {
@@ -156,6 +159,21 @@ class ClosedCaptionClient internal constructor(
             }
             throw e
         }
+    }
+
+    /**
+     * Downloads the closed caption track into [directory] under a traversal-safe [fileName] (SRT).
+     *
+     * Unlike the string-path overload, [fileName] is sanitized and cannot escape [directory], so it
+     * is safe to pass an untrusted caption/track title. [directory] is trusted and used as-is.
+     */
+    suspend fun downloadSrt(
+        trackInfo: ClosedCaptionTrackInfo,
+        directory: File,
+        fileName: String,
+        onProgress: ((Double) -> Unit)? = null
+    ) {
+        downloadSrt(trackInfo, safeFileIn(directory, fileName).path, onProgress)
     }
 
     /**

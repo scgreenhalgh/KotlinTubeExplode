@@ -156,7 +156,9 @@ data class PlaylistPanelVideoRendererDto(
                 }
                 if (current == null) return null
             }
-            return (current as? JsonPrimitive)?.content
+            // contentOrNull (not content): an explicit JSON null lands here as JsonNull, which is
+            // a JsonPrimitive whose .content is the literal string "null". contentOrNull yields null.
+            return (current as? JsonPrimitive)?.contentOrNull
         }
 
     val index: Int? get() = navigationEndpoint?.watchEndpoint?.index

@@ -3,13 +3,12 @@ package com.github.kotlintubeexplode.videos.streams
 import com.github.kotlintubeexplode.common.Language
 import com.github.kotlintubeexplode.core.VideoId
 import com.github.kotlintubeexplode.exceptions.VideoRequiresPurchaseException
+import com.github.kotlintubeexplode.exceptions.VideoUnavailableException
 import com.github.kotlintubeexplode.exceptions.VideoUnplayableException
 import com.github.kotlintubeexplode.internal.*
 import com.github.kotlintubeexplode.internal.cipher.CipherManifest
-import com.github.kotlintubeexplode.internal.cipher.PlayerScriptParser
 import com.github.kotlintubeexplode.internal.dto.PlayerResponseDto
 import com.github.kotlintubeexplode.internal.dto.StreamFormatDto
-import com.github.kotlintubeexplode.internal.dto.StreamingDataDto
 import com.github.kotlintubeexplode.common.Resolution
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -173,9 +172,10 @@ class StreamClient internal constructor(
         filePath: String,
         onProgress: ((Double) -> Unit)? = null
     ) {
-        // Sanitize basename only (preserves caller-controlled directory). Defends against
-        // common consumer pattern `download(stream, "$baseDir/$videoTitle.mp4")` where the
-        // title is derived from YouTube metadata and may contain `/`, `..`, `:`, etc.
+        // Cleans only the basename. NOTE: this does NOT make an arbitrary caller-built path
+        // traversal-safe — a title containing `/../` shoved into `filePath` can still escape (see
+        // toSafeFilePath). For untrusted YouTube titles, prefer the
+        // download(streamInfo, directory, fileName) overload, which sanitizes the name.
         val file = toSafeFilePath(filePath)
 
         if (file.exists() && file.isDirectory) {
@@ -193,6 +193,22 @@ class StreamClient internal constructor(
             }
             throw e
         }
+    }
+
+    /**
+     * Downloads a stream into [directory] under a traversal-safe [fileName].
+     *
+     * Unlike the string-path overload, [fileName] is sanitized and cannot escape [directory], so it
+     * is safe to pass an untrusted YouTube-derived title (e.g. the video title plus ".mp4").
+     * [directory] is trusted and used as-is.
+     */
+    suspend fun download(
+        streamInfo: IStreamInfo,
+        directory: java.io.File,
+        fileName: String,
+        onProgress: ((Double) -> Unit)? = null
+    ) {
+        download(streamInfo, safeFileIn(directory, fileName).path, onProgress)
     }
 
     /**
@@ -226,32 +242,32 @@ class StreamClient internal constructor(
             }
         }
 
-        // The cipher-less Android client yielded no usable streams. Upstream (StreamClient.cs
-        // GetStreamInfosAsync) falls back to the TVHTML5 embedded (cipher) client on ANY
-        // VideoUnplayableException that is NOT a VideoUnavailableException — i.e. whenever the
-        // video isn't deleted/private/region-blocked. That covers age-restricted videos AND
-        // videos that report playable but expose no streams to the cipher-less client (the
-        // "does not contain any playable streams" case). The old isAgeRestricted string
-        // heuristic missed the latter and dropped those videos straight to the dead web path.
-        // isAvailable mirrors upstream PlayerResponse.IsAvailable (status != "error" && details);
-        // age-restricted responses stay isAvailable == true, so this preserves that fallback.
-        val isUnavailable = androidResponse != null && !androidResponse.isAvailable
-
-        // 2. Fall back to the TV Embedded (cipher) client unless the video is definitively unavailable.
-        if (!isUnavailable) {
-            val tvStreams = tryTVEmbeddedClient(videoId)
-            if (tvStreams.isNotEmpty()) {
-                return tvStreams
-            }
+        // A genuinely unavailable video (deleted/private/region-blocked) is reported by upstream
+        // as the specific VideoUnavailableException carrying playabilityStatus.reason, NOT a generic
+        // "no streams". isAvailable mirrors upstream PlayerResponse.IsAvailable (status != "error"
+        // && videoDetails present). getPlayerResponseViaAndroidClient doesn't call
+        // validateAvailability, so this is the one place in the stream path that can surface the
+        // distinction — throw before the TV fallback, which has nothing to recover for such a video.
+        if (androidResponse != null && !androidResponse.isAvailable) {
+            throw VideoUnavailableException(
+                "Video '${videoId.value}' is unavailable: " +
+                    (androidResponse.playabilityStatus?.reason ?: "Unknown error")
+            )
         }
 
-        // Upstream stops here. Its stream extraction (StreamClient.cs GetStreamInfosAsync,
-        // tag 6.6 AND branch prime) tries exactly two clients — cipher-less ANDROID_VR, then
-        // TVHTML5_SIMPLY_EMBEDDED_PLAYER on VideoUnplayableException — and then reports the
-        // video unplayable. There is no third watch-page/web-client stream fallback: the WEB
-        // client's stream URLs now require a PO token and 403 on download, so it can only ever
-        // return undownloadable streams (or, once verifyStreamUrl drops them, an empty manifest
-        // that masks the real failure). Fail loudly to match upstream. See KNOWN_DRIFT #9.
+        // 2. The video is available but the cipher-less client exposed no usable streams — either
+        // age-restricted, or the upstream "playable but no streams" case. Fall back to the TVHTML5
+        // embedded (cipher) client. Upstream falls back on ANY VideoUnplayableException that is NOT
+        // VideoUnavailableException, which is exactly the set that reaches here (isAvailable == true).
+        val tvStreams = tryTVEmbeddedClient(videoId)
+        if (tvStreams.isNotEmpty()) {
+            return tvStreams
+        }
+
+        // Upstream stops here: exactly two clients — cipher-less ANDROID_VR, then
+        // TVHTML5_SIMPLY_EMBEDDED_PLAYER — then report the video unplayable. There is no third
+        // watch-page/web-client stream fallback: the WEB client's stream URLs now require a PO
+        // token and 403 on download. Fail loudly to match upstream. See KNOWN_DRIFT #9.
         throw VideoUnplayableException(
             "Video '${videoId.value}' does not contain any playable streams."
         )
@@ -295,7 +311,7 @@ class StreamClient internal constructor(
         // Also try DASH manifest if available
         streamingData.dashManifestUrl?.let { dashUrl ->
             try {
-                val manifestXml = httpController.get(dashUrl)
+                val manifestXml = httpController.get(requireGoogleHttpsUrl(dashUrl))
                 val dashStreams = dashParser.parse(manifestXml)
                 streams.addAll(dashStreams)
             } catch (e: Exception) {
@@ -339,7 +355,7 @@ class StreamClient internal constructor(
             // Also try DASH manifest
             streamingData.dashManifestUrl?.let { dashUrl ->
                 try {
-                    val manifestXml = httpController.get(dashUrl)
+                    val manifestXml = httpController.get(requireGoogleHttpsUrl(dashUrl))
                     val dashStreams = dashParser.parse(manifestXml)
                     streams.addAll(dashStreams)
                 } catch (e: Exception) {

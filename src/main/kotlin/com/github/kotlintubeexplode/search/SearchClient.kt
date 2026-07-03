@@ -23,6 +23,10 @@ class SearchClient internal constructor(
     companion object {
         private const val SEARCH_URL = "https://www.youtube.com/youtubei/v1/search"
 
+        // Upper bound on findAllByKey recursion. Real search responses nest only a few dozen
+        // levels deep; this guards against a pathological/hostile response overflowing the stack.
+        private const val MAX_RECURSION_DEPTH = 200
+
         private val json = Json {
             ignoreUnknownKeys = true
             isLenient = true
@@ -308,13 +312,7 @@ class SearchClient internal constructor(
             "thumbnailViewModel", "image", "sources"
         ) ?: return emptyList()
 
-        return sources.mapNotNull { source ->
-            val obj = source.jsonObject
-            val url = obj["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-            val width = obj["width"]?.jsonPrimitive?.intOrNull ?: 0
-            val height = obj["height"]?.jsonPrimitive?.intOrNull ?: 0
-            Thumbnail(url, width, height)
-        }
+        return sources.toThumbnails()
     }
 
     private fun parseChannelResult(renderer: JsonObject, seenIds: MutableSet<String>): ChannelSearchResult? {
@@ -339,13 +337,20 @@ class SearchClient internal constructor(
             ?: renderer.findArray("thumbnails", "0", "thumbnails")
             ?: return emptyList()
 
-        return thumbnailArray.mapNotNull { thumb ->
-            val obj = thumb.jsonObject
-            val url = obj["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-            val width = obj["width"]?.jsonPrimitive?.intOrNull ?: 0
-            val height = obj["height"]?.jsonPrimitive?.intOrNull ?: 0
-            Thumbnail(url, width, height)
-        }
+        return thumbnailArray.toThumbnails()
+    }
+
+    /**
+     * Maps a {url,width,height} image array into [Thumbnail]s, skipping entries with no url.
+     * YouTube reuses this shape for both classic renderer thumbnails and lockupViewModel image
+     * sources, so both extractors funnel through here.
+     */
+    private fun JsonArray.toThumbnails(): List<Thumbnail> = mapNotNull { element ->
+        val obj = element.jsonObject
+        val url = obj["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+        val width = obj["width"]?.jsonPrimitive?.intOrNull ?: 0
+        val height = obj["height"]?.jsonPrimitive?.intOrNull ?: 0
+        Thumbnail(url, width, height)
     }
 
     private fun extractContinuation(response: JsonObject): String? {
@@ -399,13 +404,24 @@ class SearchClient internal constructor(
     private fun JsonElement.findString(vararg path: String): String? =
         (this as? JsonObject)?.findString(*path)
 
-    private fun JsonObject.findAllByKey(key: String): List<JsonObject> {
+    // internal (not private) so the recursion-depth guard can be exercised directly in a test
+    // without threading a pathologically nested fixture through the whole search pipeline.
+    internal fun JsonObject.findAllByKey(key: String): List<JsonObject> {
         val results = mutableListOf<JsonObject>()
-        findAllByKeyRecursive(this, key, results)
+        findAllByKeyRecursive(this, key, results, depth = 0)
         return results
     }
 
-    private fun findAllByKeyRecursive(element: JsonElement, key: String, results: MutableList<JsonObject>) {
+    private fun findAllByKeyRecursive(
+        element: JsonElement,
+        key: String,
+        results: MutableList<JsonObject>,
+        depth: Int
+    ) {
+        // Bound the descent so a pathologically nested response can't overflow the stack: stop
+        // rather than throw past the limit. The parse step that produced `element`
+        // (Json.parseToJsonElement) is separately bounded by the response body-size cap.
+        if (depth >= MAX_RECURSION_DEPTH) return
         when (element) {
             is JsonObject -> {
                 element[key]?.let { value ->
@@ -414,9 +430,9 @@ class SearchClient internal constructor(
                         value.filterIsInstance<JsonObject>().forEach { results.add(it) }
                     }
                 }
-                element.values.forEach { findAllByKeyRecursive(it, key, results) }
+                element.values.forEach { findAllByKeyRecursive(it, key, results, depth + 1) }
             }
-            is JsonArray -> element.forEach { findAllByKeyRecursive(it, key, results) }
+            is JsonArray -> element.forEach { findAllByKeyRecursive(it, key, results, depth + 1) }
             else -> {}
         }
     }

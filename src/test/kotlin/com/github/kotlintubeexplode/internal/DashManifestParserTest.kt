@@ -113,4 +113,31 @@ class DashManifestParserTest {
         val video = streams.filterIsInstance<VideoOnlyStreamInfo>().single()
         video.videoQuality.framerate shouldBe 24
     }
+
+    @Test
+    fun `should drop a representation whose BaseURL is outside the Google trust boundary (SSRF)`() {
+        // A malicious/MITM DASH manifest could point a stream BaseURL at an internal host; that URL
+        // would later be fetched by the downloader. Refuse non-Google-host stream URLs at parse time
+        // (mirrors the verifyStreamUrl guard applied to the non-DASH formats).
+        val manifestXml = """
+            <MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+              <Period>
+                <AdaptationSet mimeType="video/mp4">
+                  <Representation id="137" codecs="avc1.640028" bandwidth="4500000" width="1920" height="1080" frameRate="30">
+                    <BaseURL>https://googlevideo.com/videoplayback/id/137/clen/999999</BaseURL>
+                  </Representation>
+                  <Representation id="136" codecs="avc1.4d401f" bandwidth="2500000" width="1280" height="720" frameRate="30">
+                    <BaseURL>http://169.254.169.254/latest/meta-data/</BaseURL>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        """.trimIndent()
+
+        val streams = parser.parse(manifestXml)
+
+        // Only the legit googlevideo stream survives; the internal-host one is dropped.
+        streams shouldHaveSize 1
+        streams.single().url shouldBe "https://googlevideo.com/videoplayback/id/137/clen/999999"
+    }
 }

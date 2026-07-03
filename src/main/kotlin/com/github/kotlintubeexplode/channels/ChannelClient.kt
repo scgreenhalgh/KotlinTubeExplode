@@ -148,17 +148,24 @@ class ChannelClient internal constructor(
     private suspend fun resolveChannelFromPage(url: String, notFoundMessage: String): Channel {
         repeat(CHANNEL_PAGE_RETRIES) {
             val html = httpController.getWithRetry(url, maxRetries = 3)
-            val channelId = extractChannelIdFromPage(html)
+            // Parse the <meta> map once per attempt and reuse it for both the id check and
+            // (once resolved) the title/logo extraction, instead of re-scanning the page 3x.
+            val metaTags = parseMetaTags(html)
+            val channelId = extractChannelIdFromPage(metaTags, html)
             if (channelId != null) {
-                return parseChannelPage(channelId, html)
+                return parseChannelPage(channelId, html, metaTags)
             }
         }
         throw ChannelUnavailableException(notFoundMessage)
     }
 
-    private fun parseChannelPage(channelId: ChannelId, html: String): Channel {
-        val title = extractTitle(html) ?: "Unknown Channel"
-        val logoUrl = extractLogoUrl(html)
+    private fun parseChannelPage(
+        channelId: ChannelId,
+        html: String,
+        metaTags: Map<String, String> = parseMetaTags(html)
+    ): Channel {
+        val title = extractTitle(metaTags, html) ?: "Unknown Channel"
+        val logoUrl = extractLogoUrl(metaTags)
         val thumbnails = if (logoUrl != null) {
             val size = extractLogoSize(logoUrl)
             listOf(Thumbnail(logoUrl, size, size))
@@ -173,9 +180,9 @@ class ChannelClient internal constructor(
         )
     }
 
-    private fun extractChannelIdFromPage(html: String): ChannelId? {
+    private fun extractChannelIdFromPage(metaTags: Map<String, String>, html: String): ChannelId? {
         // Order-agnostic og:url meta tag (DOM-parsed), mirroring upstream's AngleSharp read.
-        parseMetaTags(html)["og:url"]
+        metaTags["og:url"]
             ?.substringAfter("channel/", "")
             ?.let { ChannelId.tryParse(it) }
             ?.let { return it }
@@ -195,17 +202,19 @@ class ChannelClient internal constructor(
         return null
     }
 
-    private fun extractTitle(html: String): String? {
-        // Order-agnostic og:title meta tag (DOM-parsed).
-        parseMetaTags(html)["og:title"]?.let {
-            return decodeHtmlEntities(it)
+    private fun extractTitle(metaTags: Map<String, String>, html: String): String? {
+        // Order-agnostic og:title meta tag (DOM-parsed). parseXmlSecurely already resolves
+        // numeric refs + the predefined XML entities, so this value is decoded — don't decode
+        // again (a literal "&amp;#39;" would otherwise collapse to "&#39;").
+        metaTags["og:title"]?.let {
+            return it
                 .replace(" - YouTube", "")
                 .trim()
         }
 
-        // Fallback to title tag
+        // Fallback to the raw <title> tag, which is NOT DOM-decoded — decode entities here.
         Regex("""<title>([^<]+)</title>""").find(html)?.let {
-            return it.groupValues[1]
+            return decodeHtmlEntities(it.groupValues[1])
                 .replace(" - YouTube", "")
                 .trim()
         }
@@ -213,8 +222,8 @@ class ChannelClient internal constructor(
         return null
     }
 
-    private fun extractLogoUrl(html: String): String? =
-        parseMetaTags(html)["og:image"]
+    private fun extractLogoUrl(metaTags: Map<String, String>): String? =
+        metaTags["og:image"]
 
     private fun extractLogoSize(logoUrl: String): Int = parseLogoSize(logoUrl)
 }

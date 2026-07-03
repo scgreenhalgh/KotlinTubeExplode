@@ -110,10 +110,11 @@ class PlaylistClient internal constructor(
                 // Skip duplicates, but cursor still advances above.
                 if (!seenIds.add(videoId)) continue
 
-                // Skip entries where author info is unrecoverable (multi-author videos with
-                // dialog-panel author renderers, deleted/private videos with no byline, etc.).
-                // Upstream throws here, but YouTube's multi-author dialog shape has shifted
-                // and chasing the deep fallback path is fragile; permissive skip is more robust.
+                // Skip entries where author info is unrecoverable. For multi-author videos the DTO
+                // already chases the "..." dialog-panel fallback for the channel id
+                // (PlaylistPanelVideoRendererDto.authorChannelId); this skip only fires when even
+                // that returns null — deleted/private videos with no byline, or a dialog shape we
+                // can't walk. Upstream throws here; a permissive skip is more robust to shape drift.
                 val authorName = videoData.authorName ?: continue
                 val authorChannelId = videoData.authorChannelId ?: continue
 

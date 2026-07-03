@@ -1,6 +1,7 @@
 package com.github.kotlintubeexplode.internal
 
 import io.kotest.assertions.throwables.shouldNotThrowAny
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
@@ -12,10 +13,13 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import java.io.IOException
 import java.security.MessageDigest
 
 @DisplayName("HttpController")
@@ -152,6 +156,60 @@ class HttpControllerTest {
         }
     }
 
+    @Nested
+    @DisplayName("cleartext scheme credential guard (security)")
+    inner class CleartextGuardTests {
+        // A malicious/compromised YouTube response can hand back an http:// youtube.com URL
+        // (e.g. a caption baseUrl). Cookies + SAPISIDHASH must NOT ride a cleartext request,
+        // or a passive on-path observer harvests the user's Google session.
+        private val sapisid = Cookie.Builder()
+            .name("SAPISID").value("secret-session").domain("youtube.com").build()
+
+        @Test
+        fun `should not attach cookies or auth over cleartext http`() = runTest {
+            val recorder = RecordingInterceptor()
+            val controller = HttpController(client = recorder.buildClient(), initialCookies = listOf(sapisid))
+
+            controller.get("http://www.youtube.com/api/timedtext?v=x")
+
+            val req = recorder.requests.last()
+            req.header("Cookie") shouldBe null
+            req.header("Authorization") shouldBe null
+        }
+
+        @Test
+        fun `should attach cookies and auth over https`() = runTest {
+            val recorder = RecordingInterceptor()
+            val controller = HttpController(client = recorder.buildClient(), initialCookies = listOf(sapisid))
+
+            controller.get("https://www.youtube.com/api/timedtext?v=x")
+
+            val req = recorder.requests.last()
+            req.header("Cookie") shouldNotBe null
+            req.header("Authorization") shouldNotBe null
+        }
+    }
+
+    @Nested
+    @DisplayName("response body size cap (security)")
+    inner class BodySizeCapTests {
+        // A malicious/MITM response advertising a multi-GB body would OOM the client if read
+        // whole. get()/postJson() must refuse a body larger than the cap.
+        @Test
+        fun `should reject a response body advertising more than the cap`() = runTest {
+            val controller = HttpController(client = OversizedBodyInterceptor().buildClient())
+
+            shouldThrow<IOException> { controller.get("https://www.youtube.com/probe") }
+        }
+
+        @Test
+        fun `should accept a normal-sized response body`() = runTest {
+            val controller = HttpController(client = RecordingInterceptor().buildClient())
+
+            controller.get("https://www.youtube.com/probe") shouldBe "ok"
+        }
+    }
+
     /**
      * Interceptor that serves a scripted sequence of status codes. Successful (2xx)
      * responses carry a Content-Length header so getContentLength can read it back.
@@ -198,6 +256,31 @@ class HttpControllerTest {
                 .message("OK")
                 .body("ok".toResponseBody("text/plain".toMediaType()))
                 .addHeader("Content-Length", "1024")
+                .build()
+        }
+
+        fun buildClient(): OkHttpClient = OkHttpClient.Builder()
+            .addInterceptor(this)
+            .build()
+    }
+
+    /**
+     * Serves a 200 whose body ADVERTISES a huge content length (with tiny actual bytes, so the
+     * test allocates nothing large). Exercises the advertised-length rejection path of the cap.
+     */
+    private class OversizedBodyInterceptor : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val body = object : ResponseBody() {
+                override fun contentType() = "text/html".toMediaType()
+                override fun contentLength() = Long.MAX_VALUE
+                override fun source() = Buffer().writeUtf8("tiny")
+            }
+            return Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(body)
                 .build()
         }
 

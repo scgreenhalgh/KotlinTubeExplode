@@ -269,20 +269,34 @@ fun String.sanitizeFileName(): String {
 /**
  * Returns a safe `File` derived from the supplied path string.
  *
- * Sanitizes only the basename (final path segment), leaving the directory portion
- * intact. Designed for the common consumer pattern
- * `download(stream, "$baseDir/$videoTitle.mp4")` where `baseDir` is hardcoded but
- * `videoTitle` is derived from user-controlled YouTube metadata that may contain
- * `/`, `..`, `:`, etc.
+ * Cleans ONLY the basename (final path segment) via [sanitizeFileName], leaving the directory
+ * portion exactly as given.
  *
- * Note: does NOT validate the directory portion. Callers who accept user-supplied
- * directories must canonicalize and check those separately.
+ * IMPORTANT: this does NOT prevent path traversal when an untrusted value is concatenated into the
+ * path. If a caller builds `"$baseDir/$title"` and `title` (from YouTube metadata) contains `/../`,
+ * `java.io.File` splits on the LAST separator, so the `..` lands in the directory portion — which
+ * this function does not touch — and the write can escape `baseDir`. To build a download path from
+ * an untrusted title safely, use [safeFileIn] (which keeps directory and filename separate), or run
+ * the title through [sanitizeFileName] yourself before concatenating.
  */
 internal fun toSafeFilePath(filePath: String): java.io.File {
     val original = java.io.File(filePath)
     val cleanName = original.name.sanitizeFileName()
     return original.parentFile?.let { java.io.File(it, cleanName) } ?: java.io.File(cleanName)
 }
+
+/**
+ * Resolves [fileName] as a single, traversal-safe file inside [directory].
+ *
+ * [fileName] is run through [sanitizeFileName], which strips path separators (`/`, `\`) and rejects
+ * `.`/`..`, so the result can never escape [directory] — even when [fileName] is an untrusted
+ * YouTube-derived title. This is the correct way to build a download path from an untrusted name:
+ * keep the trusted [directory] and the untrusted [fileName] separate. Contrast [toSafeFilePath],
+ * which only cleans the final segment of an already-joined path string and cannot protect the
+ * directory portion.
+ */
+internal fun safeFileIn(directory: java.io.File, fileName: String): java.io.File =
+    java.io.File(directory, fileName.sanitizeFileName())
 
 /**
  * Parses URL query parameters into a map.
