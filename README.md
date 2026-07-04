@@ -14,7 +14,7 @@ No API key required. Works by reverse-engineering YouTube's internal endpoints.
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.github.kotlintubeexplode:kotlintubeexplode:1.1.0")
+    implementation("com.github.kotlintubeexplode:kotlintubeexplode:1.2.1")
 }
 ```
 
@@ -23,7 +23,7 @@ Maven:
 <dependency>
     <groupId>com.github.kotlintubeexplode</groupId>
     <artifactId>kotlintubeexplode</artifactId>
-    <version>1.1.0</version>
+    <version>1.2.1</version>
 </dependency>
 ```
 
@@ -164,6 +164,30 @@ try {
 The library fetches data from YouTube's internal API endpoints, the same ones the website uses. For encrypted stream URLs (signature cipher), it downloads YouTube's player JavaScript and extracts the decryption algorithm using regex parsing - no JavaScript execution involved.
 
 Stream downloads handle YouTube's throttling by downloading in ~10MB segments with automatic retry.
+
+## Security
+
+A few hardening measures are on by default:
+
+- **Certificate pinning** - Connections to YouTube/Google hosts are pinned to the Google Trust Services roots, so a MITM with a rogue CA can't intercept traffic. Behind a corporate proxy that does SSL inspection? Pass your own `OkHttpClient` (see [Custom HTTP Client](#custom-http-client)) to opt out.
+- **Trust boundary on response URLs** - Stream, manifest, and caption URLs pulled from YouTube responses are restricted to the `youtube.com` / `googlevideo.com` / `googleapis.com` host set, checked on every redirect hop. A tampered response can't make the client fetch some internal or attacker-controlled address.
+- **Hardened cipher parser** - The `base.js` signature parser uses bounded patterns and a linear scan, so a crafted player script can't pin the CPU with pathological regex backtracking.
+- **Resource caps** - Response bodies are capped (64 MB) and JSON parsing is depth-limited, so a malformed or hostile response can't exhaust memory or the stack.
+
+### Downloading with untrusted names
+
+If the filename comes from something you don't control (like a video title), use the overload that takes a directory plus a name — it sanitizes the name so it can't escape the directory:
+
+```kotlin
+import java.io.File
+
+// fileName is sanitized: path separators become "_", so "../../etc/passwd" can't traverse out
+youtube.streams.download(stream, File("downloads"), "${video.title}.mp4") { progress ->
+    print("\rDownloading: ${(progress * 100).toInt()}%")
+}
+```
+
+The plain `download(stream, "path/to/file.mp4")` overload cleans only the final segment — pass it trusted paths only.
 
 ## Limitations
 
