@@ -31,9 +31,26 @@ dependencies {
 }
 
 tasks.test {
-    useJUnitPlatform()
+    // Offline unit gate: excludes the live @Tag("integration") suite (real YouTube).
+    // Run those explicitly with `./gradlew integrationTest`.
+    useJUnitPlatform {
+        excludeTags("integration")
+    }
 
     // Enable ByteBuddy for MockK to work on Java 17+
+    jvmArgs(
+        "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+        "--add-opens", "java.base/java.lang.reflect=ALL-UNNAMED"
+    )
+}
+
+// Live integration tests (hit real YouTube) — opt in explicitly, not part of `test`.
+tasks.register<Test>("integrationTest") {
+    description = "Runs the @Tag(\"integration\") tests against live YouTube."
+    group = "verification"
+    useJUnitPlatform {
+        includeTags("integration")
+    }
     jvmArgs(
         "--add-opens", "java.base/java.lang=ALL-UNNAMED",
         "--add-opens", "java.base/java.lang.reflect=ALL-UNNAMED"
