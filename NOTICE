@@ -1,0 +1,9 @@
+KotlinTubeExplode
+Copyright (c) 2025 Sean Greenhalgh
+
+This software is a Kotlin/JVM port of YoutubeExplode
+(https://github.com/Tyrrrz/YoutubeExplode)
+Copyright (c) 2016-2026 Oleksii Holub
+
+YoutubeExplode is licensed under the MIT License. Its architecture, approach,
+and much of the reverse-engineering work are the basis for this port.
