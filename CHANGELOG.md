@@ -2,6 +2,14 @@
 
 All notable changes to KotlinTubeExplode are recorded here. Versions follow [Semantic Versioning](https://semver.org/), dates are ISO 8601, and each release links to its full notes on [GitHub](https://github.com/scgreenhalgh/KotlinTubeExplode/releases).
 
+## [1.3.0] - 2026-07-08
+
+Expands the poToken-free client fallback chain so more videos resolve, and makes made-for-kids audio work again. Additive — no public API changes, a drop-in from 1.2.x.
+
+### Added
+- **VISIONOS and iOS fallback clients.** When the primary Android VR client returns nothing usable, the manifest builder now tries the Apple Vision Pro (VISIONOS) and iOS clients before the cipher fallback. Both hand back plain stream URLs, so it's a resilience win for videos the VR client can't serve — fewer `VideoUnplayableException` dead-ends.
+- **Made-for-kids audio.** Made-for-kids videos are unplayable on the VR clients and expose only video-only streams on iOS, so `getBestAudioStream()` used to return null for them. A plain Android client now recovers the legacy muxed 360p stream (H.264 + AAC), which carries the audio track — so `getBestAudioStream()` returns a usable stream for kids content. It's a 360p muxed stream (~96 kbps AAC); demux the audio track if you need audio-only.
+
 ## [1.2.1] - 2026-07-04
 
 Security-hardening release. No breaking API changes — a drop-in upgrade from 1.2.0 (it adds two directory + filename download overloads).
@@ -65,6 +73,7 @@ Tracks upstream YoutubeExplode 6.6 and clears several long-standing bugs found i
 
 Initial release — a Kotlin/JVM port of [YoutubeExplode](https://github.com/Tyrrrz/YoutubeExplode) with full feature parity: video metadata, stream manifests and throttle-aware downloads, playlists, channels, search, closed captions, and pure-Kotlin cipher decryption.
 
+[1.3.0]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.3.0
 [1.2.1]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.2.1
 [1.2.0]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.2.0
 [1.1.1]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.1.1

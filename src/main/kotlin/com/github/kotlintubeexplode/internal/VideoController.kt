@@ -71,6 +71,46 @@ internal class VideoController(
          * TV Embedded client version.
          */
         private const val TV_EMBEDDED_CLIENT_VERSION = "2.0"
+
+        /**
+         * VISIONOS (Apple Vision Pro) client — a poToken-free fallback that returns plain URLs like
+         * ANDROID_VR. Params derived empirically against the live player API (not from NewPipe). A
+         * minimal context (clientName + clientVersion only) returns more formats than one carrying
+         * device fields, so deviceMake/Model/osName/osVersion are deliberately omitted.
+         */
+        private const val VISIONOS_CLIENT_NAME = "VISIONOS"
+        private const val VISIONOS_CLIENT_VERSION = "0.1"
+        private const val VISIONOS_USER_AGENT =
+            "com.google.ios.youtube.vision/0.1 (RealityDevice14,1; U; CPU visionOS 26_0 like Mac OS X;)"
+
+        /**
+         * iOS client — a poToken-free fallback from a different client family than the VR clients
+         * (a hedge if YouTube SABR-degrades the VR clients). Params are from yt-dlp (public domain).
+         * Reliable for video; audio-only formats can 403 on protected content (dropped downstream by
+         * verifyStreamUrl), so it's a video-capable backstop, not a full audio replacement.
+         */
+        private const val IOS_CLIENT_NAME = "IOS"
+        private const val IOS_CLIENT_VERSION = "21.02.3"
+        private const val IOS_DEVICE_MODEL = "iPhone16,2"
+        private const val IOS_OS_VERSION = "18.3.2.22D82"
+        private const val IOS_USER_AGENT =
+            "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+
+        /**
+         * Plain ANDROID mobile client. Unlike ANDROID_VR — which YouTube reports UNPLAYABLE for
+         * made-for-kids videos — the standard Android client still serves the legacy muxed
+         * progressive format (itag 18: 360p H.264 + AAC) with a plain, poToken-exempt URL
+         * (ratebypass, no `n=`, plaintext signature). That muxed stream is the only poToken-free way
+         * to reach audio for made-for-kids content: every adaptive audio-only itag (140/251/250) is
+         * SABR/PO-token-gated. Params verified empirically against the live player API (yt-dlp
+         * values, public domain). Returns plain URLs — no cipher.
+         */
+        private const val ANDROID_MOBILE_CLIENT_NAME = "ANDROID"
+        private const val ANDROID_MOBILE_CLIENT_VERSION = "21.02.35"
+        private const val ANDROID_MOBILE_OS_VERSION = "11"
+        private const val ANDROID_MOBILE_SDK_VERSION = 30
+        private const val ANDROID_MOBILE_USER_AGENT =
+            "com.google.android.youtube/21.02.35 (Linux; U; Android 11) gzip"
     }
 
     /**
@@ -281,6 +321,122 @@ internal class VideoController(
 
         val headers = mapOf(
             "User-Agent" to ANDROID_VR_USER_AGENT
+        )
+
+        val response = httpController.postJson(PLAYER_API_URL, requestBody, headers)
+        return pageParser.parsePlayerResponse(response)
+    }
+
+    /**
+     * Gets player response using the VISIONOS (Apple Vision Pro) client — a poToken-free fallback
+     * that returns plain URLs (no cipher). Sent with a minimal context by design (more formats than
+     * with device fields) and never a signatureTimestamp.
+     */
+    suspend fun getPlayerResponseViaVisionosClient(videoId: VideoId): PlayerResponseDto {
+        val visitorData = try {
+            resolveVisitorData()
+        } catch (e: Exception) {
+            ""
+        }
+
+        val requestBody = buildJsonObject {
+            put("videoId", videoId.value)
+            put("contentCheckOk", true)
+            putJsonObject("context") {
+                putJsonObject("client") {
+                    put("clientName", VISIONOS_CLIENT_NAME)
+                    put("clientVersion", VISIONOS_CLIENT_VERSION)
+                    put("visitorData", visitorData)
+                    put("hl", "en")
+                    put("gl", "US")
+                    put("utcOffsetMinutes", 0)
+                }
+            }
+        }.toString()
+
+        val headers = mapOf(
+            "User-Agent" to VISIONOS_USER_AGENT
+        )
+
+        val response = httpController.postJson(PLAYER_API_URL, requestBody, headers)
+        return pageParser.parsePlayerResponse(response)
+    }
+
+    /**
+     * Gets player response using the iOS client — a poToken-free fallback from a different client
+     * family than the VR clients. Returns plain URLs; audio-only formats can 403 on protected
+     * content and are dropped downstream by verifyStreamUrl.
+     */
+    suspend fun getPlayerResponseViaIosClient(videoId: VideoId): PlayerResponseDto {
+        val visitorData = try {
+            resolveVisitorData()
+        } catch (e: Exception) {
+            ""
+        }
+
+        val requestBody = buildJsonObject {
+            put("videoId", videoId.value)
+            put("contentCheckOk", true)
+            putJsonObject("context") {
+                putJsonObject("client") {
+                    put("clientName", IOS_CLIENT_NAME)
+                    put("clientVersion", IOS_CLIENT_VERSION)
+                    put("deviceMake", "Apple")
+                    put("deviceModel", IOS_DEVICE_MODEL)
+                    put("osName", "iPhone")
+                    put("osVersion", IOS_OS_VERSION)
+                    put("visitorData", visitorData)
+                    put("hl", "en")
+                    put("gl", "US")
+                    put("utcOffsetMinutes", 0)
+                }
+            }
+        }.toString()
+
+        val headers = mapOf(
+            "User-Agent" to IOS_USER_AGENT
+        )
+
+        val response = httpController.postJson(PLAYER_API_URL, requestBody, headers)
+        return pageParser.parsePlayerResponse(response)
+    }
+
+    /**
+     * Gets player response using the plain ANDROID mobile client.
+     *
+     * This is the poToken-free path to made-for-kids audio: ANDROID_VR and VISIONOS report those
+     * videos UNPLAYABLE and iOS exposes only video-only streams, but the standard Android client
+     * still returns the legacy muxed itag-18 (360p H.264 + AAC) with a plain URL (no cipher, no
+     * `n=`). The muxed stream carries the audio track; adaptive audio-only itags stay PO-token-gated.
+     * Reuses the cipher-less processing path in StreamClient.
+     */
+    suspend fun getPlayerResponseViaAndroidMobileClient(videoId: VideoId): PlayerResponseDto {
+        val visitorData = try {
+            resolveVisitorData()
+        } catch (e: Exception) {
+            ""
+        }
+
+        val requestBody = buildJsonObject {
+            put("videoId", videoId.value)
+            put("contentCheckOk", true)
+            putJsonObject("context") {
+                putJsonObject("client") {
+                    put("clientName", ANDROID_MOBILE_CLIENT_NAME)
+                    put("clientVersion", ANDROID_MOBILE_CLIENT_VERSION)
+                    put("androidSdkVersion", ANDROID_MOBILE_SDK_VERSION)
+                    put("osName", "Android")
+                    put("osVersion", ANDROID_MOBILE_OS_VERSION)
+                    put("visitorData", visitorData)
+                    put("hl", "en")
+                    put("gl", "US")
+                    put("utcOffsetMinutes", 0)
+                }
+            }
+        }.toString()
+
+        val headers = mapOf(
+            "User-Agent" to ANDROID_MOBILE_USER_AGENT
         )
 
         val response = httpController.postJson(PLAYER_API_URL, requestBody, headers)

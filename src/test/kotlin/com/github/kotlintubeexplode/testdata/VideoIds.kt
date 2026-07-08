@@ -30,4 +30,9 @@ object VideoIds {
     const val WithBrokenClosedCaptions = "1VKIIw05JnE"
     const val WithMultipleAudioLanguages = "ngqcjXfggHQ"
     const val WithUpscaledStreams = "IFACrIx5SZ0"
+
+    // Local addition (not in upstream): a made-for-kids video. ANDROID_VR and VISIONOS report it
+    // UNPLAYABLE and iOS exposes only video-only streams; audio is reachable only via the plain
+    // ANDROID client's legacy muxed itag-18 (see StreamClient's made-for-kids fallback).
+    const val MadeForKids = "XqZsoesa55w"  // "Baby Shark Dance" (Pinkfong) — extremely stable
 }

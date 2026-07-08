@@ -273,4 +273,117 @@ class VideoControllerTest {
             coVerify(exactly = 0) { pageParser.parsePlayerResponse(any()) }
         }
     }
+
+    @Nested
+    @DisplayName("VISIONOS client")
+    inner class VisionosClientTests {
+
+        private val visitorDataResponse =
+            """)]}'[[null,null,[[[null,null,null,null,null,null,null,null,null,null,null,null,null,"visitor-data-value"]]]]]"""
+
+        @Test
+        fun `VISIONOS body should use clientName VISIONOS, version 0_1 and a minimal context`() = runTest {
+            val httpController = mockk<HttpController>()
+            val pageParser = mockk<VideoPageParser>()
+            val cipherParser = mockk<PlayerScriptParser>()
+            val controller = VideoController(httpController, pageParser, cipherParser)
+
+            val videoId = VideoId("dQw4w9WgXcQ")
+
+            val bodySlot = slot<String>()
+            coEvery { httpController.get(any(), any()) } returns visitorDataResponse
+            coEvery { httpController.postJson(any(), capture(bodySlot), any()) } returns """{"playabilityStatus":{"status":"OK"}}"""
+            coEvery { pageParser.parsePlayerResponse(any()) } returns PlayerResponseDto(
+                playabilityStatus = PlayabilityStatusDto(status = "OK")
+            )
+
+            controller.getPlayerResponseViaVisionosClient(videoId)
+
+            val body = bodySlot.captured
+            body shouldContain """"clientName":"VISIONOS""""
+            body shouldContain """"clientVersion":"0.1""""
+            body shouldContain """"visitorData":"visitor-data-value""""
+            // Minimal context: VISIONOS returns more formats without device fields, and never needs a
+            // signatureTimestamp (plain URLs, no cipher).
+            body shouldNotContain "deviceModel"
+            body shouldNotContain "signatureTimestamp"
+        }
+
+        @Test
+        fun `VISIONOS should send the visionOS user agent`() = runTest {
+            val httpController = mockk<HttpController>()
+            val pageParser = mockk<VideoPageParser>()
+            val cipherParser = mockk<PlayerScriptParser>()
+            val controller = VideoController(httpController, pageParser, cipherParser)
+
+            val videoId = VideoId("dQw4w9WgXcQ")
+
+            val headersSlot = slot<Map<String, String>>()
+            coEvery { httpController.get(any(), any()) } returns visitorDataResponse
+            coEvery { httpController.postJson(any(), any(), capture(headersSlot)) } returns """{"playabilityStatus":{"status":"OK"}}"""
+            coEvery { pageParser.parsePlayerResponse(any()) } returns PlayerResponseDto(
+                playabilityStatus = PlayabilityStatusDto(status = "OK")
+            )
+
+            controller.getPlayerResponseViaVisionosClient(videoId)
+
+            val userAgent = headersSlot.captured["User-Agent"]
+            userAgent shouldContain "vision"
+        }
+    }
+
+    @Nested
+    @DisplayName("iOS client")
+    inner class IosClientTests {
+
+        private val visitorDataResponse =
+            """)]}'[[null,null,[[[null,null,null,null,null,null,null,null,null,null,null,null,null,"visitor-data-value"]]]]]"""
+
+        @Test
+        fun `iOS body should use clientName IOS, version 21_02_3 and iPhone device fields`() = runTest {
+            val httpController = mockk<HttpController>()
+            val pageParser = mockk<VideoPageParser>()
+            val cipherParser = mockk<PlayerScriptParser>()
+            val controller = VideoController(httpController, pageParser, cipherParser)
+
+            val videoId = VideoId("dQw4w9WgXcQ")
+
+            val bodySlot = slot<String>()
+            coEvery { httpController.get(any(), any()) } returns visitorDataResponse
+            coEvery { httpController.postJson(any(), capture(bodySlot), any()) } returns """{"playabilityStatus":{"status":"OK"}}"""
+            coEvery { pageParser.parsePlayerResponse(any()) } returns PlayerResponseDto(
+                playabilityStatus = PlayabilityStatusDto(status = "OK")
+            )
+
+            controller.getPlayerResponseViaIosClient(videoId)
+
+            val body = bodySlot.captured
+            body shouldContain """"clientName":"IOS""""
+            body shouldContain """"clientVersion":"21.02.3""""
+            body shouldContain "iPhone16,2"
+            body shouldContain """"visitorData":"visitor-data-value""""
+        }
+
+        @Test
+        fun `iOS should send the iOS user agent`() = runTest {
+            val httpController = mockk<HttpController>()
+            val pageParser = mockk<VideoPageParser>()
+            val cipherParser = mockk<PlayerScriptParser>()
+            val controller = VideoController(httpController, pageParser, cipherParser)
+
+            val videoId = VideoId("dQw4w9WgXcQ")
+
+            val headersSlot = slot<Map<String, String>>()
+            coEvery { httpController.get(any(), any()) } returns visitorDataResponse
+            coEvery { httpController.postJson(any(), any(), capture(headersSlot)) } returns """{"playabilityStatus":{"status":"OK"}}"""
+            coEvery { pageParser.parsePlayerResponse(any()) } returns PlayerResponseDto(
+                playabilityStatus = PlayabilityStatusDto(status = "OK")
+            )
+
+            controller.getPlayerResponseViaIosClient(videoId)
+
+            val userAgent = headersSlot.captured["User-Agent"]
+            userAgent shouldContain "com.google.ios.youtube/21.02.3"
+        }
+    }
 }

@@ -215,11 +215,14 @@ class StreamClient internal constructor(
      * Gets stream information using a multi-client approach (following C# YoutubeExplode).
      *
      * Order of attempts:
-     * 1. Android client - Primary, returns plain URLs without cipher (fastest)
-     * 2. TV Embedded client - For age-restricted and otherwise-unplayable videos (requires cipher)
+     * 1. ANDROID_VR - Primary, returns plain URLs without cipher (fastest)
+     * 2. ANDROID (mobile) - Legacy muxed itag-18 fallback; the only poToken-free audio path for
+     *    made-for-kids videos (ANDROID_VR/VISIONOS report those UNPLAYABLE; iOS is video-only)
+     * 3. VISIONOS, then iOS - Other poToken-free plain-URL clients
+     * 4. TV Embedded client - For age-restricted videos (requires cipher)
      *
-     * If neither client yields a stream the video is reported unplayable. Matching upstream,
-     * there is no third watch-page/web-client stream fallback.
+     * If no client yields a stream the video is reported unplayable. Matching upstream, there is no
+     * watch-page/web-client stream fallback.
      */
     private suspend fun getStreamInfos(videoId: VideoId): List<IStreamInfo> {
         // 1. Try Android client first (no cipher needed for most streams)
@@ -255,7 +258,33 @@ class StreamClient internal constructor(
             )
         }
 
-        // 2. The video is available but the cipher-less client exposed no usable streams — either
+        // 2. ANDROID_VR is available but exposed no usable streams (SABR-stripped, or made-for-kids).
+        // The plain ANDROID mobile client still serves the legacy muxed progressive stream (itag 18:
+        // 360p H.264 + AAC) with a poToken-free plain URL. For made-for-kids videos this is the only
+        // poToken-free audio path — their adaptive audio-only itags are all SABR/PO-token-gated — so
+        // try it before iOS, whose video-only streams carry no audio and would otherwise end the
+        // chain audio-less. Fires only when ANDROID_VR yields nothing, so normal videos are
+        // unaffected. The muxed stream is both audio and video, so getBestAudioStream() returns it.
+        val androidMobileStreams = tryAndroidMobileClient(videoId)
+        if (androidMobileStreams.isNotEmpty()) {
+            return androidMobileStreams
+        }
+
+        // 3. Still no streams — try the remaining poToken-free clients before the cipher path:
+        // VISIONOS (like-for-like plain-URL spare), then iOS (a different client family —
+        // video-reliable, though audio can 403 on protected content, which verifyStreamUrl drops).
+        // Both reuse the plain-URL path; no cipher.
+        val visionosStreams = tryVisionosClient(videoId)
+        if (visionosStreams.isNotEmpty()) {
+            return visionosStreams
+        }
+
+        val iosStreams = tryIosClient(videoId)
+        if (iosStreams.isNotEmpty()) {
+            return iosStreams
+        }
+
+        // 4. The video is available but the cipher-less client exposed no usable streams — either
         // age-restricted, or the upstream "playable but no streams" case. Fall back to the TVHTML5
         // embedded (cipher) client. Upstream falls back on ANY VideoUnplayableException that is NOT
         // VideoUnavailableException, which is exactly the set that reaches here (isAvailable == true).
@@ -364,6 +393,47 @@ class StreamClient internal constructor(
             }
 
             streams
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Tries to get streams via the plain ANDROID mobile client. poToken-free, plain URLs — reuses
+     * the cipher-less Android processing path. For made-for-kids videos this is the only client that
+     * exposes an audio-bearing stream (the legacy muxed itag-18). Returns empty on any failure.
+     */
+    private suspend fun tryAndroidMobileClient(videoId: VideoId): List<IStreamInfo> {
+        return try {
+            val response = videoController.getPlayerResponseViaAndroidMobileClient(videoId)
+            tryProcessAndroidStreams(response)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Tries to get streams via the VISIONOS (Apple Vision Pro) client. poToken-free, plain URLs —
+     * reuses the cipher-less Android processing path. Returns empty on any failure.
+     */
+    private suspend fun tryVisionosClient(videoId: VideoId): List<IStreamInfo> {
+        return try {
+            val response = videoController.getPlayerResponseViaVisionosClient(videoId)
+            tryProcessAndroidStreams(response)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Tries to get streams via the iOS client. poToken-free, plain URLs — reuses the cipher-less
+     * Android processing path. Audio-only formats may 403 on protected content and get dropped by
+     * verifyStreamUrl. Returns empty on any failure.
+     */
+    private suspend fun tryIosClient(videoId: VideoId): List<IStreamInfo> {
+        return try {
+            val response = videoController.getPlayerResponseViaIosClient(videoId)
+            tryProcessAndroidStreams(response)
         } catch (e: Exception) {
             emptyList()
         }
