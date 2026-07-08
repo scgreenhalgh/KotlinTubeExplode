@@ -2,6 +2,13 @@
 
 All notable changes to KotlinTubeExplode are recorded here. Versions follow [Semantic Versioning](https://semver.org/), dates are ISO 8601, and each release links to its full notes on [GitHub](https://github.com/scgreenhalgh/KotlinTubeExplode/releases).
 
+## [1.3.1] - 2026-07-08
+
+Resilience fix for YouTube's SABR experiment. No API changes — a drop-in from 1.3.0.
+
+### Fixed
+- **SABR-degraded responses recover automatically.** YouTube's SABR experiment intermittently returns a playable Android VR response with the adaptive formats stripped, leaving only the muxed 360p stream. The manifest builder now retries the request up to three times to recover the full format set before accepting the degraded response, so a transient degradation no longer caps you at 360p. No effect on healthy responses.
+
 ## [1.3.0] - 2026-07-08
 
 Expands the poToken-free client fallback chain so more videos resolve, and makes made-for-kids audio work again. Additive — no public API changes, a drop-in from 1.2.x.
@@ -73,6 +80,7 @@ Tracks upstream YoutubeExplode 6.6 and clears several long-standing bugs found i
 
 Initial release — a Kotlin/JVM port of [YoutubeExplode](https://github.com/Tyrrrz/YoutubeExplode) with full feature parity: video metadata, stream manifests and throttle-aware downloads, playlists, channels, search, closed captions, and pure-Kotlin cipher decryption.
 
+[1.3.1]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.3.1
 [1.3.0]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.3.0
 [1.2.1]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.2.1
 [1.2.0]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.2.0

@@ -25,6 +25,17 @@ class StreamClient internal constructor(
 ) {
     private val dashParser = DashManifestParser()
 
+    companion object {
+        /**
+         * ANDROID_VR intermittently returns a SABR-degraded response: YouTube strips the adaptive
+         * formats, leaving only the muxed 360p (itag 18). The degradation is an intermittent,
+         * session-based experiment, so a fresh request usually recovers the full set (yt-dlp
+         * #16150). Retry a degraded response up to this many times before accepting it. See
+         * KNOWN_DRIFT.md (ANDROID_VR SABR degradation).
+         */
+        private const val MAX_SABR_DEGRADED_RETRIES = 3
+    }
+
     /**
      * Gets the stream manifest for a video.
      *
@@ -225,8 +236,9 @@ class StreamClient internal constructor(
      * watch-page/web-client stream fallback.
      */
     private suspend fun getStreamInfos(videoId: VideoId): List<IStreamInfo> {
-        // 1. Try Android client first (no cipher needed for most streams)
-        val androidResponse = tryAndroidClient(videoId)
+        // 1. Try Android client first (no cipher needed for most streams). Retries transparently
+        // when YouTube returns a SABR-degraded response (adaptive formats stripped → 360p-only).
+        val androidResponse = tryAndroidClientWithSabrRetry(videoId)
 
         // Pay-to-play videos aren't "OK": YouTube advertises a free preview/trailer id inside
         // playabilityStatus.errorScreen. Upstream (StreamClient.cs GetStreamInfosAsync, L214-221)
@@ -312,6 +324,40 @@ class StreamClient internal constructor(
         } catch (e: Exception) {
             null
         }
+    }
+
+    /**
+     * Fetches the ANDROID_VR player response, retrying when YouTube returns a SABR-degraded
+     * response (adaptive formats stripped, only the muxed 360p left). The degradation is an
+     * intermittent, session-based experiment, so a fresh request usually recovers the full format
+     * set; if every retry stays degraded we return the last response (360p playback beats none).
+     * See [isSabrDegraded] and KNOWN_DRIFT.md.
+     */
+    private suspend fun tryAndroidClientWithSabrRetry(videoId: VideoId): PlayerResponseDto? {
+        var response = tryAndroidClient(videoId)
+        var attempt = 0
+        while (response != null && response.isSabrDegraded() && attempt < MAX_SABR_DEGRADED_RETRIES) {
+            attempt++
+            kotlinx.coroutines.delay(200L * attempt)
+            val retry = tryAndroidClient(videoId)
+            if (retry != null) {
+                response = retry
+            }
+        }
+        return response
+    }
+
+    /**
+     * True when a playable ANDROID_VR response has had its adaptive formats stripped by YouTube's
+     * SABR experiment, leaving only a muxed format (typically 360p itag 18). A healthy response
+     * always carries adaptive formats, so "playable, muxed present, but no adaptive formats" is the
+     * degradation signal — distinct from a genuinely stream-less response (which the normal
+     * empty-streams fallback already handles).
+     */
+    private fun PlayerResponseDto.isSabrDegraded(): Boolean {
+        if (playabilityStatus?.isPlayable != true) return false
+        val sd = streamingData ?: return false
+        return sd.adaptiveFormats.isNullOrEmpty() && !sd.formats.isNullOrEmpty()
     }
 
     /**
