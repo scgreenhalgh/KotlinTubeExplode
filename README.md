@@ -11,19 +11,40 @@ No API key required. Works by reverse-engineering YouTube's internal endpoints.
 
 ## Installation
 
+Releases are published through [JitPack](https://jitpack.io/#scgreenhalgh/KotlinTubeExplode). Add the repository first:
+
+```kotlin
+// settings.gradle.kts
+dependencyResolutionManagement {
+    repositories {
+        mavenCentral()
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+```
+
+Then the dependency (note the `v` in the version, it's the git tag):
+
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.github.kotlintubeexplode:kotlintubeexplode:1.2.1")
+    implementation("com.github.scgreenhalgh:KotlinTubeExplode:v1.3.1")
 }
 ```
 
 Maven:
 ```xml
+<repositories>
+    <repository>
+        <id>jitpack.io</id>
+        <url>https://jitpack.io</url>
+    </repository>
+</repositories>
+
 <dependency>
-    <groupId>com.github.kotlintubeexplode</groupId>
-    <artifactId>kotlintubeexplode</artifactId>
-    <version>1.2.1</version>
+    <groupId>com.github.scgreenhalgh</groupId>
+    <artifactId>KotlinTubeExplode</artifactId>
+    <version>v1.3.1</version>
 </dependency>
 ```
 
