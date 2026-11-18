@@ -1,5 +1,7 @@
 # KotlinTubeExplode
 
+[![JitPack](https://jitpack.io/v/scgreenhalgh/KotlinTubeExplode.svg)](https://jitpack.io/#scgreenhalgh/KotlinTubeExplode)
+
 A Kotlin library for extracting YouTube video metadata, streams, playlists, channels, and captions. This is a native port of [YoutubeExplode](https://github.com/Tyrrrz/YoutubeExplode) (C#) to Kotlin/JVM.
 
 No API key required. Works by reverse-engineering YouTube's internal endpoints.
@@ -23,7 +25,7 @@ dependencyResolutionManagement {
 }
 ```
 
-Then the dependency (note the `v` in the version, it's the git tag):
+Then the dependency. The version is the git tag, `v` included. The badge above always shows the latest one:
 
 ```kotlin
 // build.gradle.kts
@@ -86,6 +88,7 @@ youtube.videos.get("https://www.youtube.com/watch?v=dQw4w9WgXcQ") // Full URL
 youtube.videos.get("https://youtu.be/dQw4w9WgXcQ")                 // Short URL
 youtube.videos.get("https://www.youtube.com/embed/dQw4w9WgXcQ")   // Embed
 youtube.videos.get("https://www.youtube.com/shorts/dQw4w9WgXcQ")  // Shorts
+youtube.videos.get("https://www.youtube.com/live/dQw4w9WgXcQ")    // Live
 ```
 
 ### Search
@@ -149,7 +152,7 @@ val youtube = YoutubeClient(client)
 
 The library distinguishes between:
 
-- **Muxed streams** - Audio + video combined (usually lower quality, max 720p)
+- **Muxed streams** - Audio + video combined. YouTube only serves these at 360p now
 - **Audio-only streams** - Just audio (use for music, podcasts)
 - **Video-only streams** - Just video (combine with audio for high quality)
 
