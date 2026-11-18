@@ -11,8 +11,12 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.security.MessageDigest
+import java.time.Instant
+import java.time.temporal.ChronoUnit
+import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -58,11 +62,35 @@ internal class HttpController(
         const val YOUTUBE_API_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
 
         /**
-         * YouTube consent cookie value.
-         * This is required to access some personalized content, such as mix playlists.
-         * The cookie is valid for 13 months from the date it was generated.
+         * Builds the SOCS consent cookie value for [consentDate]. YouTube needs it to serve some
+         * personalized content (mix playlists, for one) without the EU consent interstitial.
+         *
+         * The cookie embeds the time consent was given and YouTube treats it as invalid after
+         * 13 months, so it's generated from the current date rather than hardcoded (a hardcoded
+         * value lapsed on us in Nov 2026). Port of upstream 6.6.3's
+         * YoutubeHttpHandler.GenerateConsentCookieValue (PR #975).
+         *
+         * Protobuf layout: `{ 1: 2, 2: { 1: 3, 2: "813836352", 3: "en", 4: 1 }, 3: { 1: <unix seconds> } }`
          */
-        const val CONSENT_COOKIE_VALUE = "CAISEwgDEgk4MTM4MzYzNTIaAmVuIAEaBgiApPzGBg"
+        internal fun generateConsentCookieValue(consentDate: Instant): String {
+            // Round down to the start of the UTC day, like the cookies YouTube issues.
+            val dayStart = consentDate.truncatedTo(ChronoUnit.DAYS).epochSecond.toULong()
+
+            val timestampMessage = ByteArrayOutputStream().apply {
+                write(0x08)
+                Protobuf.writeVarint(this, dayStart)
+            }.toByteArray()
+
+            val buffer = ByteArrayOutputStream().apply {
+                write(byteArrayOf(0x08, 0x02, 0x12, 0x13, 0x08, 0x03, 0x12, 0x09))
+                write("813836352".toByteArray(Charsets.US_ASCII))
+                write(byteArrayOf(0x1A, 0x02, 'e'.code.toByte(), 'n'.code.toByte(), 0x20, 0x01))
+                write(byteArrayOf(0x1A, timestampMessage.size.toByte()))
+                write(timestampMessage)
+            }.toByteArray()
+
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(buffer)
+        }
 
         /**
          * Maximum number of retries for transient 5xx server errors.
@@ -151,7 +179,7 @@ internal class HttpController(
         if (youtubeUrl != null) {
             val consentCookie = Cookie.Builder()
                 .name("SOCS")
-                .value(CONSENT_COOKIE_VALUE)
+                .value(generateConsentCookieValue(Instant.now()))
                 .domain("youtube.com")
                 .path("/")
                 .secure()

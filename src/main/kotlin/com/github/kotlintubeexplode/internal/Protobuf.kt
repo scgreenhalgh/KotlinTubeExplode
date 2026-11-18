@@ -47,6 +47,16 @@ internal object Protobuf {
 
     private fun isLenField(tag: ULong): Boolean = (tag and 0x7UL).toInt() == WIRE_TYPE_LEN
 
+    /** Appends [value] to [buffer] as a base-128 varint (mirrors upstream Protobuf.WriteVarint). */
+    fun writeVarint(buffer: java.io.ByteArrayOutputStream, value: ULong) {
+        var v = value
+        while (v >= 0x80UL) {
+            buffer.write(((v and 0x7FUL) or 0x80UL).toInt())
+            v = v shr 7
+        }
+        buffer.write(v.toInt())
+    }
+
     /**
      * Decodes a protobuf-encoded `map<string, string>` payload.
      * Each top-level LEN field is treated as a map entry submessage with

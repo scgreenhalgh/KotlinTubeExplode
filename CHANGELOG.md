@@ -2,6 +2,16 @@
 
 All notable changes to KotlinTubeExplode are recorded here. Versions follow [Semantic Versioning](https://semver.org/), dates are ISO 8601, and each release links to its full notes on [GitHub](https://github.com/scgreenhalgh/KotlinTubeExplode/releases).
 
+## [1.3.2] - 2026-11-18
+
+Gets streams working again after YouTube started bot-checking the Android VR client. No API changes — a drop-in from 1.3.1.
+
+### Fixed
+- **Streams load again for videos YouTube bot-checks on Android VR.** Android VR now gets "Sign in to confirm you're not a bot" for a lot of videos, and the manifest builder took that as `VideoUnavailableException` without ever trying the clients that still work. VISIONOS is now the primary client (same move as YoutubeExplode 6.6.2), Android VR drops to a fallback, and a video is only reported unavailable when every client agrees it is.
+- **`getHttpLiveStreamUrl` works for live streams again.** It pulled the HLS URL from the web watch page, which doesn't include it anymore. It now comes from the player responses.
+- **Closed captions show up again.** Caption tracks only came from Android VR, so a bot-checked video looked like it had none. They now come from the first client that has them (VISIONOS returns none, so in practice that's Android or iOS).
+- **The consent cookie doesn't expire anymore.** The hardcoded `SOCS` cookie is only valid for 13 months and lapsed in November 2026. It's now generated from the current date, as in YoutubeExplode 6.6.3.
+
 ## [1.3.1] - 2026-07-08
 
 Resilience fix for YouTube's SABR experiment. No API changes — a drop-in from 1.3.0.
@@ -80,6 +90,7 @@ Tracks upstream YoutubeExplode 6.6 and clears several long-standing bugs found i
 
 Initial release — a Kotlin/JVM port of [YoutubeExplode](https://github.com/Tyrrrz/YoutubeExplode) with full feature parity: video metadata, stream manifests and throttle-aware downloads, playlists, channels, search, closed captions, and pure-Kotlin cipher decryption.
 
+[1.3.2]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.3.2
 [1.3.1]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.3.1
 [1.3.0]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.3.0
 [1.2.1]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.2.1

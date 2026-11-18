@@ -10,6 +10,7 @@ import com.github.kotlintubeexplode.internal.cipher.CipherManifest
 import com.github.kotlintubeexplode.internal.dto.PlayerResponseDto
 import com.github.kotlintubeexplode.internal.dto.StreamFormatDto
 import com.github.kotlintubeexplode.common.Resolution
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -27,11 +28,11 @@ class StreamClient internal constructor(
 
     companion object {
         /**
-         * ANDROID_VR intermittently returns a SABR-degraded response: YouTube strips the adaptive
-         * formats, leaving only the muxed 360p (itag 18). The degradation is an intermittent,
-         * session-based experiment, so a fresh request usually recovers the full set (yt-dlp
-         * #16150). Retry a degraded response up to this many times before accepting it. See
-         * KNOWN_DRIFT.md (ANDROID_VR SABR degradation).
+         * The VR-family clients (VISIONOS, ANDROID_VR) intermittently return a SABR-degraded
+         * response: YouTube strips the adaptive formats, leaving only the muxed 360p (itag 18).
+         * The degradation is an intermittent, session-based experiment, so a fresh request usually
+         * recovers the full set (yt-dlp #16150). Retry a degraded response up to this many times
+         * before accepting it. See KNOWN_DRIFT.md (SABR degradation).
          */
         private const val MAX_SABR_DEGRADED_RETRIES = 3
     }
@@ -91,17 +92,19 @@ class StreamClient internal constructor(
      * @throws IllegalStateException if HLS URL is not available
      */
     suspend fun getHttpLiveStreamUrl(videoId: VideoId): String {
-        val watchUrl = "https://www.youtube.com/watch?v=${videoId.value}&bpctr=9999999999"
-        val html = httpController.getWithRetry(watchUrl, maxRetries = 3)
+        // The web watch page no longer carries hlsManifestUrl for live streams, so read it from
+        // the cipher-less player responses, as upstream 6.6.2 does (GetPlayerResponseAsync).
+        var firstReason: String? = null
+        for (client in cipherlessClients(videoId)) {
+            val response = fetchOrNull(client.request) ?: continue
+            response.streamingData?.hlsManifestUrl?.let { return it }
+            firstReason = firstReason ?: response.playabilityStatus?.reason
+        }
 
-        val pageParser = VideoPageParser()
-        val playerResponse = pageParser.parseWatchPage(html)
-
-        return playerResponse.streamingData?.hlsManifestUrl
-            ?: throw VideoUnplayableException(
-                "HLS manifest URL not available for video '${videoId.value}': " +
-                    (playerResponse.playabilityStatus?.reason ?: "unplayable")
-            )
+        throw VideoUnplayableException(
+            "HLS manifest URL not available for video '${videoId.value}': " +
+                (firstReason ?: "not a live stream")
+        )
     }
 
     /**
@@ -223,123 +226,113 @@ class StreamClient internal constructor(
     }
 
     /**
-     * Gets stream information using a multi-client approach (following C# YoutubeExplode).
+     * Gets stream information using a multi-client approach (following C# YoutubeExplode 6.6.2).
      *
-     * Order of attempts:
-     * 1. ANDROID_VR - Primary, returns plain URLs without cipher (fastest)
-     * 2. ANDROID (mobile) - Legacy muxed itag-18 fallback; the only poToken-free audio path for
-     *    made-for-kids videos (ANDROID_VR/VISIONOS report those UNPLAYABLE; iOS is video-only)
-     * 3. VISIONOS, then iOS - Other poToken-free plain-URL clients
-     * 4. TV Embedded client - For age-restricted videos (requires cipher)
+     * Order of attempts (the first client that yields usable streams wins):
+     * 1. VISIONOS - Primary. poToken-free plain URLs. Upstream 6.6.2 made it primary because
+     *    ANDROID_VR now hits YouTube's bot check for many videos.
+     * 2. ANDROID_VR - Former primary, kept as a plain-URL fallback (it still serves many videos)
+     * 3. ANDROID (mobile) - Legacy muxed itag-18 fallback; the only poToken-free audio path for
+     *    made-for-kids videos (VISIONOS/ANDROID_VR report those UNPLAYABLE; iOS is video-only)
+     * 4. iOS - Plain-URL client from a different client family
+     * 5. TV Embedded client - For age-restricted videos (requires cipher)
      *
+     * A failed request just moves on to the next client. Stream-processing errors are not caught
+     * here, so a parser regression surfaces instead of being masked. The video is reported
+     * unavailable only when every cipher-less client says so: YouTube's bot check (LOGIN_REQUIRED
+     * with no videoDetails) is indistinguishable from an unavailable video in a single response.
      * If no client yields a stream the video is reported unplayable. Matching upstream, there is no
      * watch-page/web-client stream fallback.
      */
     private suspend fun getStreamInfos(videoId: VideoId): List<IStreamInfo> {
-        // 1. Try Android client first (no cipher needed for most streams). Retries transparently
-        // when YouTube returns a SABR-degraded response (adaptive formats stripped → 360p-only).
-        val androidResponse = tryAndroidClientWithSabrRetry(videoId)
+        val responses = mutableListOf<PlayerResponseDto>()
+        for (client in cipherlessClients(videoId)) {
+            val response = (if (client.sabrRetry) fetchWithSabrRetry(client.request) else fetchOrNull(client.request))
+                ?: continue
 
-        // Pay-to-play videos aren't "OK": YouTube advertises a free preview/trailer id inside
-        // playabilityStatus.errorScreen. Upstream (StreamClient.cs GetStreamInfosAsync, L214-221)
-        // throws VideoRequiresPurchaseException for these before any stream extraction.
-        androidResponse?.playabilityStatus?.previewVideoId?.let { previewId ->
-            throw VideoRequiresPurchaseException(
-                "Video '${videoId.value}' requires purchase and cannot be played.",
-                VideoId.parse(previewId)
-            )
-        }
+            // Pay-to-play videos aren't "OK": YouTube advertises a free preview/trailer id inside
+            // playabilityStatus.errorScreen. Upstream (StreamClient.cs GetStreamInfosAsync) throws
+            // VideoRequiresPurchaseException for these before any stream extraction.
+            response.playabilityStatus?.previewVideoId?.let { previewId ->
+                throw VideoRequiresPurchaseException(
+                    "Video '${videoId.value}' requires purchase and cannot be played.",
+                    VideoId.parse(previewId)
+                )
+            }
 
-        if (androidResponse != null) {
-            val androidStreams = tryProcessAndroidStreams(androidResponse)
-            if (androidStreams.isNotEmpty()) {
-                return androidStreams
+            responses += response
+            val streams = tryProcessAndroidStreams(response)
+            if (streams.isNotEmpty()) {
+                return streams
             }
         }
 
-        // A genuinely unavailable video (deleted/private/region-blocked) is reported by upstream
-        // as the specific VideoUnavailableException carrying playabilityStatus.reason, NOT a generic
-        // "no streams". isAvailable mirrors upstream PlayerResponse.IsAvailable (status != "error"
-        // && videoDetails present). getPlayerResponseViaAndroidClient doesn't call
-        // validateAvailability, so this is the one place in the stream path that can surface the
-        // distinction — throw before the TV fallback, which has nothing to recover for such a video.
-        if (androidResponse != null && !androidResponse.isAvailable) {
-            throw VideoUnavailableException(
-                "Video '${videoId.value}' is unavailable: " +
-                    (androidResponse.playabilityStatus?.reason ?: "Unknown error")
-            )
+        // A genuinely unavailable video (deleted/private/region-blocked) is reported as the specific
+        // VideoUnavailableException carrying playabilityStatus.reason, not a generic "no streams".
+        // isAvailable mirrors upstream PlayerResponse.IsAvailable (status != "error" && videoDetails
+        // present). Like upstream 6.6.2, only trust it when no client saw the video as available:
+        // a bot-checked response fails isAvailable too. Throw before the TV fallback, which has
+        // nothing to recover for such a video.
+        if (responses.isNotEmpty() && responses.none { it.isAvailable }) {
+            val reason = responses.firstNotNullOfOrNull { it.playabilityStatus?.reason } ?: "Unknown error"
+            throw VideoUnavailableException("Video '${videoId.value}' is unavailable: $reason")
         }
 
-        // 2. ANDROID_VR is available but exposed no usable streams (SABR-stripped, or made-for-kids).
-        // The plain ANDROID mobile client still serves the legacy muxed progressive stream (itag 18:
-        // 360p H.264 + AAC) with a poToken-free plain URL. For made-for-kids videos this is the only
-        // poToken-free audio path — their adaptive audio-only itags are all SABR/PO-token-gated — so
-        // try it before iOS, whose video-only streams carry no audio and would otherwise end the
-        // chain audio-less. Fires only when ANDROID_VR yields nothing, so normal videos are
-        // unaffected. The muxed stream is both audio and video, so getBestAudioStream() returns it.
-        val androidMobileStreams = tryAndroidMobileClient(videoId)
-        if (androidMobileStreams.isNotEmpty()) {
-            return androidMobileStreams
-        }
-
-        // 3. Still no streams — try the remaining poToken-free clients before the cipher path:
-        // VISIONOS (like-for-like plain-URL spare), then iOS (a different client family —
-        // video-reliable, though audio can 403 on protected content, which verifyStreamUrl drops).
-        // Both reuse the plain-URL path; no cipher.
-        val visionosStreams = tryVisionosClient(videoId)
-        if (visionosStreams.isNotEmpty()) {
-            return visionosStreams
-        }
-
-        val iosStreams = tryIosClient(videoId)
-        if (iosStreams.isNotEmpty()) {
-            return iosStreams
-        }
-
-        // 4. The video is available but the cipher-less client exposed no usable streams — either
+        // The video is available but no cipher-less client exposed usable streams: either
         // age-restricted, or the upstream "playable but no streams" case. Fall back to the TVHTML5
-        // embedded (cipher) client. Upstream falls back on ANY VideoUnplayableException that is NOT
-        // VideoUnavailableException, which is exactly the set that reaches here (isAvailable == true).
+        // embedded (cipher) client.
         val tvStreams = tryTVEmbeddedClient(videoId)
         if (tvStreams.isNotEmpty()) {
             return tvStreams
         }
 
-        // Upstream stops here: exactly two clients — cipher-less ANDROID_VR, then
-        // TVHTML5_SIMPLY_EMBEDDED_PLAYER — then report the video unplayable. There is no third
-        // watch-page/web-client stream fallback: the WEB client's stream URLs now require a PO
-        // token and 403 on download. Fail loudly to match upstream. See KNOWN_DRIFT #9.
+        // There is no further watch-page/web-client stream fallback: the WEB client's stream URLs
+        // now require a PO token and 403 on download. Fail loudly to match upstream. See
+        // KNOWN_DRIFT #9.
         throw VideoUnplayableException(
             "Video '${videoId.value}' does not contain any playable streams."
         )
     }
 
     /**
-     * Tries to get player response via Android client.
-     * Returns null on any failure.
+     * A cipher-less player request. [sabrRetry] marks the VR-family clients, whose responses
+     * YouTube's SABR experiment can degrade (see [fetchWithSabrRetry]).
      */
-    private suspend fun tryAndroidClient(videoId: VideoId): PlayerResponseDto? {
+    private class CipherlessClient(val request: suspend () -> PlayerResponseDto, val sabrRetry: Boolean)
+
+    /** The cipher-less clients in chain order: VISIONOS, ANDROID_VR, ANDROID, iOS. */
+    private fun cipherlessClients(videoId: VideoId): List<CipherlessClient> = listOf(
+        CipherlessClient({ videoController.getPlayerResponseViaVisionosClient(videoId) }, sabrRetry = true),
+        CipherlessClient({ videoController.getPlayerResponseViaAndroidClient(videoId) }, sabrRetry = true),
+        CipherlessClient({ videoController.getPlayerResponseViaAndroidMobileClient(videoId) }, sabrRetry = false),
+        CipherlessClient({ videoController.getPlayerResponseViaIosClient(videoId) }, sabrRetry = false),
+    )
+
+    /** Runs a player request, returning null on failure so the chain moves to the next client. */
+    private suspend fun fetchOrNull(fetch: suspend () -> PlayerResponseDto): PlayerResponseDto? {
         return try {
-            videoController.getPlayerResponseViaAndroidClient(videoId)
+            fetch()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             null
         }
     }
 
     /**
-     * Fetches the ANDROID_VR player response, retrying when YouTube returns a SABR-degraded
-     * response (adaptive formats stripped, only the muxed 360p left). The degradation is an
-     * intermittent, session-based experiment, so a fresh request usually recovers the full format
-     * set; if every retry stays degraded we return the last response (360p playback beats none).
+     * Runs a player request, retrying when YouTube returns a SABR-degraded response (adaptive
+     * formats stripped, only the muxed 360p left). The degradation is an intermittent,
+     * session-based experiment, so a fresh request usually recovers the full format set; if every
+     * retry stays degraded we return the last response (360p playback beats none).
      * See [isSabrDegraded] and KNOWN_DRIFT.md.
      */
-    private suspend fun tryAndroidClientWithSabrRetry(videoId: VideoId): PlayerResponseDto? {
-        var response = tryAndroidClient(videoId)
+    private suspend fun fetchWithSabrRetry(fetch: suspend () -> PlayerResponseDto): PlayerResponseDto? {
+        var response = fetchOrNull(fetch)
         var attempt = 0
         while (response != null && response.isSabrDegraded() && attempt < MAX_SABR_DEGRADED_RETRIES) {
             attempt++
             kotlinx.coroutines.delay(200L * attempt)
-            val retry = tryAndroidClient(videoId)
+            val retry = fetchOrNull(fetch)
             if (retry != null) {
                 response = retry
             }
@@ -348,7 +341,7 @@ class StreamClient internal constructor(
     }
 
     /**
-     * True when a playable ANDROID_VR response has had its adaptive formats stripped by YouTube's
+     * True when a playable VR-family response has had its adaptive formats stripped by YouTube's
      * SABR experiment, leaving only a muxed format (typically 360p itag 18). A healthy response
      * always carries adaptive formats, so "playable, muxed present, but no adaptive formats" is the
      * degradation signal — distinct from a genuinely stream-less response (which the normal
@@ -439,47 +432,6 @@ class StreamClient internal constructor(
             }
 
             streams
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
-
-    /**
-     * Tries to get streams via the plain ANDROID mobile client. poToken-free, plain URLs — reuses
-     * the cipher-less Android processing path. For made-for-kids videos this is the only client that
-     * exposes an audio-bearing stream (the legacy muxed itag-18). Returns empty on any failure.
-     */
-    private suspend fun tryAndroidMobileClient(videoId: VideoId): List<IStreamInfo> {
-        return try {
-            val response = videoController.getPlayerResponseViaAndroidMobileClient(videoId)
-            tryProcessAndroidStreams(response)
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
-
-    /**
-     * Tries to get streams via the VISIONOS (Apple Vision Pro) client. poToken-free, plain URLs —
-     * reuses the cipher-less Android processing path. Returns empty on any failure.
-     */
-    private suspend fun tryVisionosClient(videoId: VideoId): List<IStreamInfo> {
-        return try {
-            val response = videoController.getPlayerResponseViaVisionosClient(videoId)
-            tryProcessAndroidStreams(response)
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
-
-    /**
-     * Tries to get streams via the iOS client. poToken-free, plain URLs — reuses the cipher-less
-     * Android processing path. Audio-only formats may 403 on protected content and get dropped by
-     * verifyStreamUrl. Returns empty on any failure.
-     */
-    private suspend fun tryIosClient(videoId: VideoId): List<IStreamInfo> {
-        return try {
-            val response = videoController.getPlayerResponseViaIosClient(videoId)
-            tryProcessAndroidStreams(response)
         } catch (e: Exception) {
             emptyList()
         }

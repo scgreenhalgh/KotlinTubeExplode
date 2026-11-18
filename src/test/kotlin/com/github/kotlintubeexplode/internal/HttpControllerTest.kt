@@ -5,6 +5,7 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
+import io.kotest.matchers.string.shouldNotContain
 import kotlinx.coroutines.test.runTest
 import okhttp3.Cookie
 import okhttp3.Interceptor
@@ -21,6 +22,7 @@ import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import java.io.IOException
 import java.security.MessageDigest
+import java.time.Instant
 
 @DisplayName("HttpController")
 class HttpControllerTest {
@@ -153,6 +155,40 @@ class HttpControllerTest {
                 .joinToString("") { "%02X".format(it) }
 
             actualHash shouldBe expectedHash
+        }
+    }
+
+    @Nested
+    @DisplayName("SOCS consent cookie (upstream 6.6.3)")
+    inner class ConsentCookieTests {
+        // The SOCS cookie embeds the date consent was given, and YouTube treats it as invalid
+        // after 13 months. Our hardcoded value encoded 2025-10-03 and lapsed around 2026-11-03.
+        // Upstream YoutubeExplode 6.6.3 (PR #975) generates it from the current date instead.
+
+        @Test
+        fun `should reproduce the previously hardcoded cookie for its consent date`() {
+            HttpController.generateConsentCookieValue(Instant.parse("2025-10-03T15:00:00Z")) shouldBe
+                "CAISEwgDEgk4MTM4MzYzNTIaAmVuIAEaBgiApPzGBg"
+        }
+
+        @Test
+        fun `should round the consent date down to the start of the UTC day`() {
+            val expected = "CAISEwgDEgk4MTM4MzYzNTIaAmVuIAEaBgiA1fPXBg"
+            HttpController.generateConsentCookieValue(Instant.parse("2026-11-18T00:00:00Z")) shouldBe expected
+            HttpController.generateConsentCookieValue(Instant.parse("2026-11-18T23:59:59Z")) shouldBe expected
+        }
+
+        @Test
+        fun `should send a SOCS cookie dated today`() = runTest {
+            val recorder = RecordingInterceptor()
+            val expected = HttpController.generateConsentCookieValue(Instant.now())
+            val controller = HttpController(client = recorder.buildClient())
+
+            controller.get("https://www.youtube.com/probe")
+
+            val cookieHeader = recorder.requests.last().header("Cookie")
+            cookieHeader shouldContain "SOCS=$expected"
+            cookieHeader shouldNotContain "SOCS=CAISEwgDEgk4MTM4MzYzNTIaAmVuIAEaBgiApPzGBg"
         }
     }
 

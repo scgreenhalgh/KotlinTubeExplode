@@ -30,7 +30,7 @@ Then the dependency. The version is the git tag, `v` included. The badge above a
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.github.scgreenhalgh:KotlinTubeExplode:v1.3.1")
+    implementation("com.github.scgreenhalgh:KotlinTubeExplode:v1.3.2")
 }
 ```
 
@@ -46,7 +46,7 @@ Maven:
 <dependency>
     <groupId>com.github.scgreenhalgh</groupId>
     <artifactId>KotlinTubeExplode</artifactId>
-    <version>v1.3.1</version>
+    <version>v1.3.2</version>
 </dependency>
 ```
 

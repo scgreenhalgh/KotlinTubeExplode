@@ -20,7 +20,7 @@ object VideoIds {
     const val ContentCheckSuicide = "4QXCPuwBz2E"
     const val RequiresPurchase = "p3dDcKOFXQg"
     const val RequiresPurchaseDistributed = "qs3NZHVM_Ik"
-    const val LiveStream = "jfKfPfyJRdk"
+    const val LiveStream = "4xDzrJKXOOY"
     const val LiveStreamRecording = "rsAAeyAr-9Y"
     const val WithBrokenTitle = "4ZJWv6t-PfY"
     const val WithHighQualityStreams = "V5Fsj_sCKdg"
@@ -29,7 +29,7 @@ object VideoIds {
     const val WithClosedCaptions = "YltHGKX80Y8"
     const val WithBrokenClosedCaptions = "1VKIIw05JnE"
     const val WithMultipleAudioLanguages = "ngqcjXfggHQ"
-    const val WithUpscaledStreams = "IFACrIx5SZ0"
+    const val WithUpscaledStreams = "0N1_0SUGlDQ"
 
     // Local addition (not in upstream): a made-for-kids video. ANDROID_VR and VISIONOS report it
     // UNPLAYABLE and iOS exposes only video-only streams; audio is reachable only via the plain
