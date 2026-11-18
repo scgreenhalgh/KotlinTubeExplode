@@ -1,10 +1,12 @@
 package com.github.kotlintubeexplode.videos.streams
 
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.RequestLimitExceededException
 import com.github.kotlintubeexplode.exceptions.VideoRequiresPurchaseException
 import com.github.kotlintubeexplode.exceptions.VideoUnavailableException
 import com.github.kotlintubeexplode.exceptions.VideoUnplayableException
 import com.github.kotlintubeexplode.internal.HttpController
+import com.github.kotlintubeexplode.internal.HttpException
 import com.github.kotlintubeexplode.internal.VideoController
 import com.github.kotlintubeexplode.internal.VideoPageParser
 import com.github.kotlintubeexplode.internal.cipher.CipherManifest
@@ -23,11 +25,14 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.coVerifyOrder
 import io.mockk.mockk
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import java.io.IOException
+import java.net.SocketTimeoutException
+import java.util.concurrent.atomic.AtomicInteger
 
 @DisplayName("StreamClient client fallback")
 class StreamClientFallbackTest {
@@ -321,7 +326,7 @@ class StreamClientFallbackTest {
         fun `should fall through a bot-checked ANDROID_VR response to the next client`() = runTest {
             val http = mockk<HttpController>()
             val videoController = mockk<VideoController>()
-            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } throws IOException("visionos down")
+            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } returns botChecked()
             coEvery { videoController.getPlayerResponseViaAndroidClient(any(), any()) } returns botChecked()
             coEvery { videoController.getPlayerResponseViaAndroidMobileClient(any()) } returns oneAudioStream()
             coEvery { http.getContentLength(any()) } returns 2L
@@ -374,6 +379,117 @@ class StreamClientFallbackTest {
             val ex = shouldThrow<VideoRequiresPurchaseException> { streamClient.getManifest(videoId) }
             ex.previewVideoId.toString() shouldBe "9bZkp7q19f0"
             coVerify(exactly = 0) { videoController.getPlayerResponseViaAndroidClient(any(), any()) }
+        }
+    }
+
+    @Nested
+    @DisplayName("network failures (v1.3.3)")
+    inner class NetworkFailureTests {
+        // Every player request goes to www.youtube.com, so a transport error, a 5xx or a 429 from one
+        // client says nothing about the video, and the next client would most likely hit it too.
+        // Those used to be swallowed: a dead network came back as "does not contain any playable
+        // streams" (which getManifest never retries), and a partial failure could come back as
+        // VideoUnavailableException. Falling past VISIONOS on a blip would also quietly hand back a
+        // worse manifest (ANDROID_VR bot-checked, ANDROID 360p only), so the stream chain stops and
+        // lets getManifest retry instead.
+
+        private val playerUrl = "https://www.youtube.com/youtubei/v1/player"
+
+        @Test
+        fun `should surface a network error instead of reporting the video unplayable`() = runTest {
+            val http = mockk<HttpController>()
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } throws
+                SocketTimeoutException("connect timed out")
+
+            shouldThrow<SocketTimeoutException> { StreamClient(http, videoController).getManifest(videoId) }
+        }
+
+        @Test
+        fun `should not report unavailable when a later client fails with a network error`() = runTest {
+            val http = mockk<HttpController>()
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } returns botChecked()
+            coEvery { videoController.getPlayerResponseViaAndroidClient(any(), any()) } throws
+                SocketTimeoutException("connect timed out")
+
+            shouldThrow<SocketTimeoutException> { StreamClient(http, videoController).getManifest(videoId) }
+        }
+
+        @Test
+        fun `should surface a rate limit without retrying or trying other clients`() = runTest {
+            val http = mockk<HttpController>()
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } throws
+                RequestLimitExceededException("Exceeded request rate limit.")
+
+            shouldThrow<RequestLimitExceededException> { StreamClient(http, videoController).getManifest(videoId) }
+            coVerify(exactly = 1) { videoController.getPlayerResponseViaVisionosClient(any()) }
+            coVerify(exactly = 0) { videoController.getPlayerResponseViaAndroidClient(any(), any()) }
+        }
+
+        @Test
+        fun `should treat a 5xx from a client as a retryable network error`() = runTest {
+            val http = mockk<HttpController>()
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } throws
+                HttpException(503, "Service Unavailable", playerUrl)
+
+            shouldThrow<HttpException> { StreamClient(http, videoController).getManifest(videoId) }
+            // getManifest's five attempts, each stopping at VISIONOS.
+            coVerify(exactly = 5) { videoController.getPlayerResponseViaVisionosClient(any()) }
+        }
+
+        @Test
+        fun `should check at most 8 formats at once`() = runTest {
+            // googlevideo only speaks HTTP/1.1, so every parallel check opens its own connection.
+            // Checking all ~25 formats at once is a burst that weak networks drop connections from.
+            // Upstream (prime, #978) caps it at 8 (MaxDegreeOfParallelism = 8).
+            val http = mockk<HttpController>()
+            val videoController = mockk<VideoController>()
+            val formats = (1..20).map { i ->
+                StreamFormatDto(
+                    itag = 1000 + i,
+                    url = "https://rr1---sn-test.googlevideo.com/videoplayback?itag=${1000 + i}",
+                    mimeType = "audio/mp4; codecs=\"mp4a.40.2\"",
+                    bitrate = 128_000,
+                    contentLength = "1000"
+                )
+            }
+            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } returns PlayerResponseDto(
+                playabilityStatus = PlayabilityStatusDto(status = "OK"),
+                videoDetails = VideoDetailsDto(videoId = videoId.value, title = "test"),
+                streamingData = StreamingDataDto(adaptiveFormats = formats)
+            )
+            val inFlight = AtomicInteger(0)
+            val maxInFlight = AtomicInteger(0)
+            coEvery { http.getContentLength(any()) } coAnswers {
+                maxInFlight.accumulateAndGet(inFlight.incrementAndGet()) { a, b -> maxOf(a, b) }
+                delay(50)
+                inFlight.decrementAndGet()
+                2L
+            }
+
+            val manifest = StreamClient(http, videoController).getManifest(videoId)
+
+            manifest.streams shouldHaveSize 20
+            maxInFlight.get() shouldBe 8
+        }
+
+        // Guard (passes before and after the change): a 4xx is about this one client, say a retired
+        // client version, so the chain moves on instead of failing the whole request.
+        @Test
+        fun `should move on to the next client after an HTTP 4xx`() = runTest {
+            val http = mockk<HttpController>()
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } throws
+                HttpException(400, "Bad Request", playerUrl)
+            coEvery { videoController.getPlayerResponseViaAndroidClient(any(), any()) } returns oneAudioStream()
+            coEvery { http.getContentLength(any()) } returns 2L
+
+            val manifest = StreamClient(http, videoController).getManifest(videoId)
+
+            manifest.streams shouldHaveSize 1
         }
     }
 }

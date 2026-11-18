@@ -30,7 +30,7 @@ Then the dependency. The version is the git tag, `v` included. The badge above a
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.github.scgreenhalgh:KotlinTubeExplode:v1.3.2")
+    implementation("com.github.scgreenhalgh:KotlinTubeExplode:v1.3.3")
 }
 ```
 
@@ -46,7 +46,7 @@ Maven:
 <dependency>
     <groupId>com.github.scgreenhalgh</groupId>
     <artifactId>KotlinTubeExplode</artifactId>
-    <version>v1.3.2</version>
+    <version>v1.3.3</version>
 </dependency>
 ```
 
@@ -180,8 +180,12 @@ try {
     // Video exists but can't be played (age-restricted, etc.)
 } catch (e: RequestLimitExceededException) {
     // Rate limited by YouTube (HTTP 429)
+} catch (e: IOException) {
+    // Network trouble (timeout, no connection, YouTube 5xx). Fine to retry later
 }
 ```
+
+Network failures come through as `IOException` (or `RequestLimitExceededException` for a 429) rather than as `VideoUnavailableException` / `VideoUnplayableException`, so those two are about the video, not your connection.
 
 ## How It Works
 

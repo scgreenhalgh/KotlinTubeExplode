@@ -2,6 +2,7 @@ package com.github.kotlintubeexplode.videos.streams
 
 import com.github.kotlintubeexplode.common.Language
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.RequestLimitExceededException
 import com.github.kotlintubeexplode.exceptions.VideoRequiresPurchaseException
 import com.github.kotlintubeexplode.exceptions.VideoUnavailableException
 import com.github.kotlintubeexplode.exceptions.VideoUnplayableException
@@ -14,6 +15,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.io.InputStream
 import java.io.OutputStream
 
@@ -35,6 +38,12 @@ class StreamClient internal constructor(
          * before accepting it. See KNOWN_DRIFT.md (SABR degradation).
          */
         private const val MAX_SABR_DEGRADED_RETRIES = 3
+
+        /**
+         * Most stream URL checks (verifyStreamUrl) to run at once while building a manifest.
+         * Matches upstream's MaxDegreeOfParallelism = 8 (YoutubeExplode prime, #978).
+         */
+        private const val MAX_CONCURRENT_STREAM_CHECKS = 8
     }
 
     /**
@@ -94,13 +103,27 @@ class StreamClient internal constructor(
     suspend fun getHttpLiveStreamUrl(videoId: VideoId): String {
         // The web watch page no longer carries hlsManifestUrl for live streams, so read it from
         // the cipher-less player responses, as upstream 6.6.2 does (GetPlayerResponseAsync).
+        // Any client's HLS URL will do, so a failed request moves on to the next client. If none
+        // has a URL and a request failed on the network, that failure is the real answer; a rate
+        // limit applies to the whole IP, so it stops the chain at once.
         var firstReason: String? = null
+        var networkFailure: Exception? = null
         for (client in cipherlessClients(videoId)) {
-            val response = fetchOrNull(client.request) ?: continue
+            val response = try {
+                client.request()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: RequestLimitExceededException) {
+                throw e
+            } catch (e: Exception) {
+                if (e.isNetworkFailure()) networkFailure = networkFailure ?: e
+                continue
+            }
             response.streamingData?.hlsManifestUrl?.let { return it }
             firstReason = firstReason ?: response.playabilityStatus?.reason
         }
 
+        networkFailure?.let { throw it }
         throw VideoUnplayableException(
             "HLS manifest URL not available for video '${videoId.value}': " +
                 (firstReason ?: "not a live stream")
@@ -308,13 +331,23 @@ class StreamClient internal constructor(
         CipherlessClient({ videoController.getPlayerResponseViaIosClient(videoId) }, sabrRetry = false),
     )
 
-    /** Runs a player request, returning null on failure so the chain moves to the next client. */
+    /**
+     * Runs a player request for the stream chain. A failure that's specific to this client (HTTP
+     * 4xx, unreadable response) returns null so the chain moves to the next client.
+     *
+     * A network failure, 5xx or rate limit is rethrown ([isNetworkFailure]). It says nothing about
+     * the video, the other clients share the host, and falling past VISIONOS on a blip would quietly
+     * hand back a worse manifest (ANDROID_VR bot-checked, ANDROID 360p only). Rethrowing lets
+     * getManifest retry it, or surface RequestLimitExceededException, instead of the chain ending
+     * in a misleading VideoUnplayableException or VideoUnavailableException.
+     */
     private suspend fun fetchOrNull(fetch: suspend () -> PlayerResponseDto): PlayerResponseDto? {
         return try {
             fetch()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (e.isNetworkFailure()) throw e
             null
         }
     }
@@ -368,10 +401,13 @@ class StreamClient internal constructor(
 
         // Process formats in parallel — each format may issue HEAD + range-fetch verifications
         // (verifyStreamUrl), so serial processing makes manifest fetch O(n) HTTP round trips.
+        // Capped at MAX_CONCURRENT_STREAM_CHECKS: googlevideo is HTTP/1.1, so each in-flight check
+        // is its own connection, and an uncapped burst of ~25 is what weak networks drop.
+        val permits = Semaphore(MAX_CONCURRENT_STREAM_CHECKS)
         val processedFormats = coroutineScope {
             streamingData.allFormats
                 .filter { it.url != null }
-                .map { format -> async { processFormatWithoutCipher(format) } }
+                .map { format -> async { permits.withPermit { processFormatWithoutCipher(format) } } }
                 .awaitAll()
         }
         streams.addAll(processedFormats.filterNotNull())
@@ -411,11 +447,14 @@ class StreamClient internal constructor(
             val streamingData = response.streamingData ?: return emptyList()
             val streams = mutableListOf<IStreamInfo>()
 
-            // TV Embedded returns ciphered streams. Process in parallel — see Android-client
-            // comment above for rationale.
+            // TV Embedded returns ciphered streams. Process in parallel, with the same cap — see
+            // the Android-client comment above for rationale.
+            val permits = Semaphore(MAX_CONCURRENT_STREAM_CHECKS)
             val processedFormats = coroutineScope {
                 streamingData.allFormats
-                    .map { format -> async { processFormat(format, cipherManifest) { cipherManifest } } }
+                    .map { format ->
+                        async { permits.withPermit { processFormat(format, cipherManifest) { cipherManifest } } }
+                    }
                     .awaitAll()
             }
             streams.addAll(processedFormats.filterNotNull())

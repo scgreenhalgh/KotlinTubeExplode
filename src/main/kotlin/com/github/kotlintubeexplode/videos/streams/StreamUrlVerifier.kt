@@ -1,7 +1,36 @@
 package com.github.kotlintubeexplode.videos.streams
 
+import com.github.kotlintubeexplode.exceptions.RequestLimitExceededException
 import com.github.kotlintubeexplode.internal.HttpController
 import com.github.kotlintubeexplode.internal.isGoogleHttpsUrl
+import com.github.kotlintubeexplode.internal.isNetworkFailure
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+
+/** Attempts per check (HEAD or range probe), counting the first. */
+private const val CHECK_ATTEMPTS = 3
+
+/**
+ * Runs one check, retrying network failures with a short backoff. A manifest checks ~25 formats
+ * and any check that throws aborts the whole getManifest attempt, so a blip on one connection
+ * would otherwise restart every player request and every check. Non-network failures (a parser
+ * regression, say) and rate limits are not retried. After the last attempt the failure
+ * propagates, so getManifest can still retry the attempt as a whole.
+ */
+private suspend fun <T> retryOnNetworkFailure(check: suspend () -> T): T {
+    var attempt = 1
+    while (true) {
+        try {
+            return check()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (e is RequestLimitExceededException || !e.isNetworkFailure() || attempt >= CHECK_ATTEMPTS) throw e
+            delay(200L * attempt)
+            attempt++
+        }
+    }
+}
 
 /**
  * Verifies that a stream URL is fetchable and returns its content length.
@@ -33,7 +62,7 @@ internal suspend fun verifyStreamUrl(
     if (!isGoogleHttpsUrl(url)) return null
 
     val contentLength = providedContentLength
-        ?: httpController.getContentLength(url)
+        ?: retryOnNetworkFailure { httpController.getContentLength(url) }
         ?: return null
 
     // Range params are (contentLength - 2, contentLength - 1). Anything below 2 produces a
@@ -42,7 +71,7 @@ internal suspend fun verifyStreamUrl(
     if (contentLength < 2) return contentLength
 
     val rangeUrl = MediaStream.getSegmentUrl(url, contentLength - 2, contentLength - 1)
-    if (httpController.getContentLength(rangeUrl) == null) return null
+    if (retryOnNetworkFailure { httpController.getContentLength(rangeUrl) } == null) return null
 
     return contentLength
 }

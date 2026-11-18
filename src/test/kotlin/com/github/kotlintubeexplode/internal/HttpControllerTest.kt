@@ -193,6 +193,26 @@ class HttpControllerTest {
     }
 
     @Nested
+    @DisplayName("timeouts (v1.3.3)")
+    inner class TimeoutTests {
+        // OkHttp 4.12 tries a host's addresses one at a time, so a connect that hangs (flaky IPv6,
+        // a dropped SYN) costs the whole connect timeout before the next address is tried. At 30s,
+        // a single hang outlasted most callers' patience. OkHttp's own default is 10s.
+
+        @Test
+        fun `default client should give up on a hung connect after 10 seconds`() {
+            HttpController.defaultClient.connectTimeoutMillis shouldBe 10_000
+        }
+
+        // Guard (passes before and after): reads stay at 30s, since a slow segment download is
+        // still making progress and shouldn't be cut off.
+        @Test
+        fun `default client should keep a 30 second read timeout`() {
+            HttpController.defaultClient.readTimeoutMillis shouldBe 30_000
+        }
+    }
+
+    @Nested
     @DisplayName("cleartext scheme credential guard (security)")
     inner class CleartextGuardTests {
         // A malicious/compromised YouTube response can hand back an http:// youtube.com URL

@@ -1,6 +1,7 @@
 package com.github.kotlintubeexplode.videos.streams
 
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.RequestLimitExceededException
 import com.github.kotlintubeexplode.exceptions.VideoRequiresPurchaseException
 import com.github.kotlintubeexplode.exceptions.VideoUnplayableException
 import com.github.kotlintubeexplode.internal.HttpController
@@ -15,12 +16,14 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import java.io.IOException
+import java.net.SocketTimeoutException
 
 @DisplayName("StreamClient")
 class StreamClientTest {
@@ -133,6 +136,50 @@ class StreamClientTest {
             }
 
             ex.message shouldContain videoId.value
+        }
+
+        // v1.3.3: any client's HLS URL is as good as another's, so a network error on one client
+        // moves on to the next. But if none has a URL, that error is the answer, not "not a live
+        // stream". A rate limit applies to the whole IP, so it stops the chain at once.
+
+        @Test
+        fun `should surface a network error instead of reporting no HLS URL`() = runTest {
+            val http = mockk<HttpController>()
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } throws
+                SocketTimeoutException("connect timed out")
+            coEvery { videoController.getPlayerResponseViaAndroidClient(any(), any()) } returns live(null)
+            coEvery { videoController.getPlayerResponseViaAndroidMobileClient(any()) } returns live(null)
+            coEvery { videoController.getPlayerResponseViaIosClient(any()) } returns live(null)
+
+            shouldThrow<SocketTimeoutException> {
+                StreamClient(http, videoController).getHttpLiveStreamUrl(videoId)
+            }
+        }
+
+        // Guard (passes before and after): a network error on one client still lets the next answer.
+        @Test
+        fun `should use the next client's HLS URL after a network error`() = runTest {
+            val http = mockk<HttpController>()
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } throws
+                SocketTimeoutException("connect timed out")
+            coEvery { videoController.getPlayerResponseViaAndroidClient(any(), any()) } returns live(hlsUrl)
+
+            StreamClient(http, videoController).getHttpLiveStreamUrl(videoId) shouldBe hlsUrl
+        }
+
+        @Test
+        fun `should surface a rate limit immediately`() = runTest {
+            val http = mockk<HttpController>()
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } throws
+                RequestLimitExceededException("Exceeded request rate limit.")
+
+            shouldThrow<RequestLimitExceededException> {
+                StreamClient(http, videoController).getHttpLiveStreamUrl(videoId)
+            }
+            coVerify(exactly = 0) { videoController.getPlayerResponseViaAndroidClient(any(), any()) }
         }
     }
 }

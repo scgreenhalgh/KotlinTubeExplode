@@ -2,8 +2,10 @@ package com.github.kotlintubeexplode.videos.closedcaptions
 
 import com.github.kotlintubeexplode.common.Language
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.RequestLimitExceededException
 import com.github.kotlintubeexplode.internal.HttpController
 import com.github.kotlintubeexplode.internal.VideoController
+import com.github.kotlintubeexplode.internal.isNetworkFailure
 import com.github.kotlintubeexplode.internal.dto.ClosedCaptionTrackResponseDto
 import com.github.kotlintubeexplode.internal.dto.PlayerResponseDto
 import com.github.kotlintubeexplode.internal.requireGoogleHttpsUrl
@@ -35,15 +37,21 @@ class ClosedCaptionClient internal constructor(
         // VISIONOS returns no caption tracks and ANDROID_VR is now bot-checked for many videos,
         // so take the first cipher-less client that has tracks. ANDROID and iOS caption URLs
         // serve real timedtext (checked live 2026-11-18).
+        //
+        // Any client's tracks will do, so a failed request moves on to the next client. A rate
+        // limit applies to the whole IP, so it stops at once.
         var lastError: Exception? = null
+        var networkFailure: Exception? = null
         var anyResponse = false
         for (request in captionClients(videoId)) {
             val playerResponse = try {
                 request()
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: RequestLimitExceededException) {
+                throw e
             } catch (e: Exception) {
-                lastError = e
+                if (e.isNetworkFailure()) networkFailure = networkFailure ?: e else lastError = e
                 continue
             }
             anyResponse = true
@@ -53,7 +61,10 @@ class ClosedCaptionClient internal constructor(
             }
         }
 
-        // Every request failed: surface the error rather than pretend the video has no captions.
+        // No client had tracks. If a request failed on the network we don't actually know that
+        // the video has none, so surface the failure rather than an empty manifest. Likewise if
+        // every request failed for client-specific reasons.
+        networkFailure?.let { throw it }
         if (!anyResponse && lastError != null) {
             throw lastError
         }

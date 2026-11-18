@@ -1,6 +1,9 @@
 package com.github.kotlintubeexplode.videos.streams
 
 import com.github.kotlintubeexplode.internal.HttpController
+import com.github.kotlintubeexplode.internal.VideoParseException
+import io.kotest.assertions.throwables.shouldNotThrowAny
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -9,6 +12,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import java.net.SocketTimeoutException
 
 @DisplayName("verifyStreamUrl")
 class StreamUrlVerifierTest {
@@ -105,6 +109,59 @@ class StreamUrlVerifierTest {
             val result = verifyStreamUrl(http, url, providedContentLength = null)
 
             result shouldBe null
+        }
+    }
+
+    @Nested
+    @DisplayName("network errors during a check (v1.3.3)")
+    inner class NetworkErrorTests {
+        // A manifest checks ~25 formats, and any check that throws aborts the whole getManifest
+        // attempt (every player request and every check starts over). On a network that drops 1 in
+        // 10 connections, all 25 succeed only ~7% of the time. Retrying the one check first keeps a
+        // blip local; persistent failures still propagate so getManifest can retry the attempt.
+
+        @Test
+        fun `should retry a range check that fails with a network error`() = runTest {
+            val http = mockk<HttpController>()
+            coEvery { http.getContentLength(match { it.contains("range=") }) } throws
+                SocketTimeoutException("connect timed out") andThen 2L
+
+            val result = shouldNotThrowAny { verifyStreamUrl(http, url, providedContentLength = 1000L) }
+
+            result shouldBe 1000L
+            coVerify(exactly = 2) { http.getContentLength(any()) }
+        }
+
+        @Test
+        fun `should retry the length HEAD when it fails with a network error`() = runTest {
+            val http = mockk<HttpController>()
+            coEvery { http.getContentLength(url) } throws SocketTimeoutException("connect timed out") andThen 1000L
+            coEvery { http.getContentLength(match { it.contains("range=") }) } returns 2L
+
+            val result = shouldNotThrowAny { verifyStreamUrl(http, url, providedContentLength = null) }
+
+            result shouldBe 1000L
+            coVerify(exactly = 2) { http.getContentLength(url) }
+        }
+
+        @Test
+        fun `should rethrow after three failed attempts`() = runTest {
+            val http = mockk<HttpController>()
+            coEvery { http.getContentLength(any()) } throws SocketTimeoutException("connect timed out")
+
+            shouldThrow<SocketTimeoutException> { verifyStreamUrl(http, url, providedContentLength = 1000L) }
+            coVerify(exactly = 3) { http.getContentLength(any()) }
+        }
+
+        // Guard (passes before and after): a parser regression is not a network blip, so it must
+        // surface on the first attempt (see StreamClientRetryTest).
+        @Test
+        fun `should not retry a non-network failure`() = runTest {
+            val http = mockk<HttpController>()
+            coEvery { http.getContentLength(any()) } throws VideoParseException("response shape changed")
+
+            shouldThrow<VideoParseException> { verifyStreamUrl(http, url, providedContentLength = 1000L) }
+            coVerify(exactly = 1) { http.getContentLength(any()) }
         }
     }
 }

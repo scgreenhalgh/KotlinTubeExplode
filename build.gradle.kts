@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.github.scgreenhalgh"
-version = "1.3.2"
+version = "1.3.3"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17

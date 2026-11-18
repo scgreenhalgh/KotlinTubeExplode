@@ -1,6 +1,7 @@
 package com.github.kotlintubeexplode.videos.closedcaptions
 
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.RequestLimitExceededException
 import com.github.kotlintubeexplode.internal.HttpController
 import com.github.kotlintubeexplode.internal.VideoController
 import com.github.kotlintubeexplode.internal.dto.CaptionNameDto
@@ -20,6 +21,7 @@ import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import java.io.IOException
+import java.net.SocketTimeoutException
 
 @DisplayName("ClosedCaptionClient")
 class ClosedCaptionClientTest {
@@ -148,6 +150,53 @@ class ClosedCaptionClientTest {
             coEvery { videoController.getPlayerResponseViaIosClient(videoId) } throws IOException("offline")
 
             shouldThrow<IOException> { ClosedCaptionClient(http, videoController).getManifest(videoId) }
+        }
+
+        // v1.3.3: a network error on one client moves on to the next (any client's tracks will do),
+        // but if no client has tracks the network error is the answer, not "no captions". A rate
+        // limit applies to the whole IP, so it stops at once.
+
+        @Test
+        fun `should surface a network error instead of reporting no captions`() = runTest {
+            val http = mockk<HttpController>(relaxed = true)
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(videoId) } throws
+                SocketTimeoutException("connect timed out")
+            coEvery { videoController.getPlayerResponseViaAndroidClient(videoId, any()) } returns noCaptions()
+            coEvery { videoController.getPlayerResponseViaAndroidMobileClient(videoId) } returns noCaptions()
+            coEvery { videoController.getPlayerResponseViaIosClient(videoId) } returns noCaptions()
+
+            shouldThrow<SocketTimeoutException> { ClosedCaptionClient(http, videoController).getManifest(videoId) }
+        }
+
+        // Guard (passes before and after): a network error on one client still lets the next answer.
+        @Test
+        fun `should use the next client's tracks after a network error`() = runTest {
+            val http = mockk<HttpController>(relaxed = true)
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(videoId) } throws
+                SocketTimeoutException("connect timed out")
+            coEvery { videoController.getPlayerResponseViaAndroidClient(videoId, any()) } returns botChecked()
+            coEvery {
+                videoController.getPlayerResponseViaAndroidMobileClient(videoId)
+            } returns playerResponseWithTrackUrl("https://android/api/timedtext")
+
+            val manifest = ClosedCaptionClient(http, videoController).getManifest(videoId)
+
+            manifest.tracks.size shouldBe 1
+        }
+
+        @Test
+        fun `should surface a rate limit immediately`() = runTest {
+            val http = mockk<HttpController>(relaxed = true)
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(videoId) } throws
+                RequestLimitExceededException("Exceeded request rate limit.")
+
+            shouldThrow<RequestLimitExceededException> {
+                ClosedCaptionClient(http, videoController).getManifest(videoId)
+            }
+            coVerify(exactly = 0) { videoController.getPlayerResponseViaAndroidClient(videoId, any()) }
         }
     }
 }

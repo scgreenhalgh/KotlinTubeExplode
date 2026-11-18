@@ -2,6 +2,19 @@
 
 All notable changes to KotlinTubeExplode are recorded here. Versions follow [Semantic Versioning](https://semver.org/), dates are ISO 8601, and each release links to its full notes on [GitHub](https://github.com/scgreenhalgh/KotlinTubeExplode/releases).
 
+## [1.3.3] - 2026-11-19
+
+Copes much better with slow or flaky networks. No API changes — a drop-in from 1.3.2.
+
+### Fixed
+- **Network trouble is reported as network trouble.** A timeout, dropped connection or YouTube 5xx while fetching player data used to be swallowed, so a perfectly fine video could come back as `VideoUnplayableException` ("does not contain any playable streams") or even `VideoUnavailableException` ("Sign in to confirm you're not a bot"). Those now surface as `IOException`, which `getManifest` retries first, and a rate limit surfaces as `RequestLimitExceededException`. Same for `getHttpLiveStreamUrl` and closed captions.
+- **One dropped connection no longer restarts the whole manifest.** Each stream URL check retries network errors (up to 3 attempts) before giving up.
+- **Fewer connections at once.** Stream URL checks are capped at 8 in flight, like upstream's dev branch, instead of firing one per format all at once.
+- **Hung connects give up sooner.** The default connect timeout is 10 seconds, down from 30 (OkHttp's own default).
+
+### Changed
+- If you catch `VideoUnplayableException` to handle a failed fetch, catch `IOException` too: that's what network failures throw now. All three methods could already throw it before; it's just used consistently now.
+
 ## [1.3.2] - 2026-11-18
 
 Gets streams working again after YouTube started bot-checking the Android VR client. No API changes — a drop-in from 1.3.1.
@@ -90,6 +103,7 @@ Tracks upstream YoutubeExplode 6.6 and clears several long-standing bugs found i
 
 Initial release — a Kotlin/JVM port of [YoutubeExplode](https://github.com/Tyrrrz/YoutubeExplode) with full feature parity: video metadata, stream manifests and throttle-aware downloads, playlists, channels, search, closed captions, and pure-Kotlin cipher decryption.
 
+[1.3.3]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.3.3
 [1.3.2]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.3.2
 [1.3.1]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.3.1
 [1.3.0]: https://github.com/scgreenhalgh/KotlinTubeExplode/releases/tag/v1.3.0

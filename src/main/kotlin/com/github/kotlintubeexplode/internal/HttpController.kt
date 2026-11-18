@@ -151,9 +151,13 @@ internal class HttpController(
          * Google roots AND the cross-host credential-stripping network interceptor. Both
          * [defaultClient] and YoutubeClient's owned client use this, so the shipped default path is
          * actually pinned (it previously built a bare, unpinned client and bypassed the pins).
+         *
+         * Connect timeout is 10s (OkHttp's own default): OkHttp 4 tries a host's addresses one at a
+         * time, so a hung connect (flaky IPv6, a dropped SYN) costs the full timeout before the next
+         * address. Reads stay at 30s so a slow but progressing download isn't cut off.
          */
         fun newSecureClientBuilder(): OkHttpClient.Builder = OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .followRedirects(true)
