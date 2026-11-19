@@ -62,6 +62,24 @@ class ExceptionsTest {
     }
 
     @Nested
+    @DisplayName("BotCheckException")
+    inner class BotCheckExceptionTests {
+        // Extends VideoUnavailableException so catch blocks written before v1.4.0 still see it.
+
+        @Test
+        fun `should extend VideoUnavailableException`() {
+            val exception = BotCheckException("Sign in to confirm you’re not a bot")
+            exception.shouldBeInstanceOf<VideoUnavailableException>()
+        }
+
+        @Test
+        fun `should have correct message`() {
+            val exception = BotCheckException("Video 'x' is unavailable: Sign in to confirm you’re not a bot")
+            exception.message shouldBe "Video 'x' is unavailable: Sign in to confirm you’re not a bot"
+        }
+    }
+
+    @Nested
     @DisplayName("VideoRequiresPurchaseException")
     inner class VideoRequiresPurchaseExceptionTests {
 

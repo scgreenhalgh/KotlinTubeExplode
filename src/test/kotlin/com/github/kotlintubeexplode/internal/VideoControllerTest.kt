@@ -1,10 +1,13 @@
 package com.github.kotlintubeexplode.internal
 
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.BotCheckException
+import com.github.kotlintubeexplode.exceptions.VideoUnavailableException
 import com.github.kotlintubeexplode.internal.cipher.PlayerScriptParser
 import com.github.kotlintubeexplode.internal.dto.*
 import com.github.kotlintubeexplode.videos.Video
 import io.kotest.assertions.throwables.shouldNotThrowAny
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
@@ -271,6 +274,59 @@ class VideoControllerTest {
             video.title shouldBe "From Watch Page"
             coVerify(exactly = 0) { httpController.postJson(any(), any(), any()) }
             coVerify(exactly = 0) { pageParser.parsePlayerResponse(any()) }
+        }
+    }
+
+    @Nested
+    @DisplayName("getVideo bot check (v1.4.0)")
+    inner class GetVideoBotCheckTests {
+        // When the watch page has no video details, getVideo falls back to ANDROID_VR, which is
+        // now bot-checked for many videos. A bot check isn't an answer about the video, so it gets
+        // its own type; but if the watch page itself said the video is private, that's the answer.
+
+        private val videoId = VideoId("dQw4w9WgXcQ")
+
+        private val visitorDataResponse =
+            """)]}'[[null,null,[[[null,null,null,null,null,null,null,null,null,null,null,null,null,"visitor-data-value"]]]]]"""
+
+        private fun botChecked() = PlayerResponseDto(
+            playabilityStatus = PlayabilityStatusDto(
+                status = "LOGIN_REQUIRED",
+                reason = "Sign in to confirm you’re not a bot"
+            )
+        )
+
+        private fun privateVideo() = PlayerResponseDto(
+            playabilityStatus = PlayabilityStatusDto(status = "ERROR", reason = "This video is private")
+        )
+
+        private suspend fun getVideoWith(watchPage: PlayerResponseDto, androidVr: PlayerResponseDto): Video {
+            val httpController = mockk<HttpController>()
+            val pageParser = mockk<VideoPageParser>()
+            val cipherParser = mockk<PlayerScriptParser>()
+            coEvery { httpController.getWithRetry(any(), any(), any()) } returns "<html>...</html>"
+            coEvery { pageParser.extractPlayerScriptUrl(any()) } returns null
+            coEvery { pageParser.parseWatchPage(any()) } returns watchPage
+            coEvery { httpController.get(any(), any()) } returns visitorDataResponse
+            coEvery { httpController.postJson(any(), any(), any()) } returns "{}"
+            coEvery { pageParser.parsePlayerResponse(any()) } returns androidVr
+            return VideoController(httpController, pageParser, cipherParser).getVideo(videoId)
+        }
+
+        @Test
+        fun `should throw BotCheckException when the watch page and ANDROID_VR are both bot-checked`() = runTest {
+            val ex = shouldThrow<BotCheckException> { getVideoWith(botChecked(), botChecked()) }
+
+            ex.message shouldContain videoId.value
+            ex.message shouldContain "not a bot"
+        }
+
+        @Test
+        fun `should throw a plain VideoUnavailableException when the watch page says private`() = runTest {
+            val ex = shouldThrow<VideoUnavailableException> { getVideoWith(privateVideo(), botChecked()) }
+
+            ex::class shouldBe VideoUnavailableException::class
+            ex.message shouldContain "This video is private"
         }
     }
 

@@ -30,7 +30,7 @@ Then the dependency. The version is the git tag, `v` included. The badge above a
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.github.scgreenhalgh:KotlinTubeExplode:v1.3.3")
+    implementation("com.github.scgreenhalgh:KotlinTubeExplode:v1.4.0")
 }
 ```
 
@@ -46,7 +46,7 @@ Maven:
 <dependency>
     <groupId>com.github.scgreenhalgh</groupId>
     <artifactId>KotlinTubeExplode</artifactId>
-    <version>v1.3.3</version>
+    <version>v1.4.0</version>
 </dependency>
 ```
 
@@ -174,6 +174,9 @@ val videoStreams = manifest.getVideoOnlyStreams()
 ```kotlin
 try {
     val video = youtube.videos.get(videoId)
+} catch (e: BotCheckException) {
+    // YouTube's "Sign in to confirm you're not a bot". That's about your IP, not the video,
+    // so try again later or from another network. Must come before VideoUnavailableException
 } catch (e: VideoUnavailableException) {
     // Video doesn't exist or is private
 } catch (e: VideoUnplayableException) {
@@ -185,7 +188,7 @@ try {
 }
 ```
 
-Network failures come through as `IOException` (or `RequestLimitExceededException` for a 429) rather than as `VideoUnavailableException` / `VideoUnplayableException`, so those two are about the video, not your connection.
+Network failures come through as `IOException` (or `RequestLimitExceededException` for a 429) rather than as `VideoUnavailableException` / `VideoUnplayableException`, so those two are about the video, not your connection. `BotCheckException` (since 1.4.0) is the exception to that: it's a `VideoUnavailableException` subclass, so older code still catches it, but it means YouTube blocked the request and we never found out whether the video exists. The stream, video, live-stream and caption methods all throw it.
 
 ## How It Works
 

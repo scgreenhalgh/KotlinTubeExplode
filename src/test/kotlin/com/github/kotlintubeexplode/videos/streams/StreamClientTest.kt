@@ -1,6 +1,7 @@
 package com.github.kotlintubeexplode.videos.streams
 
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.BotCheckException
 import com.github.kotlintubeexplode.exceptions.RequestLimitExceededException
 import com.github.kotlintubeexplode.exceptions.VideoRequiresPurchaseException
 import com.github.kotlintubeexplode.exceptions.VideoUnplayableException
@@ -181,5 +182,61 @@ class StreamClientTest {
             }
             coVerify(exactly = 0) { videoController.getPlayerResponseViaAndroidClient(any(), any()) }
         }
+    }
+
+    @Nested
+    @DisplayName("HLS bot check (v1.4.0)")
+    inner class HttpLiveStreamBotCheckTests {
+
+        private val videoId = VideoId("jfKfPfyJRdk")
+
+        private fun botChecked() = PlayerResponseDto(
+            playabilityStatus = PlayabilityStatusDto(
+                status = "LOGIN_REQUIRED",
+                reason = "Sign in to confirm you’re not a bot"
+            )
+        )
+
+        private fun notLive() = PlayerResponseDto(
+            playabilityStatus = PlayabilityStatusDto(status = "OK"),
+            videoDetails = VideoDetailsDto(videoId = videoId.value, title = "not live"),
+            streamingData = StreamingDataDto(hlsManifestUrl = null)
+        )
+
+        @Test
+        fun `should throw BotCheckException when every client is bot-checked`() = runTest {
+            val http = mockk<HttpController>()
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } returns botChecked()
+            coEvery { videoController.getPlayerResponseViaAndroidClient(any(), any()) } returns botChecked()
+            coEvery { videoController.getPlayerResponseViaAndroidMobileClient(any()) } returns botChecked()
+            coEvery { videoController.getPlayerResponseViaIosClient(any()) } returns botChecked()
+
+            val ex = shouldThrow<BotCheckException> {
+                StreamClient(http, videoController).getHttpLiveStreamUrl(videoId)
+            }
+
+            ex.message shouldContain videoId.value
+            ex.message shouldContain "not a bot"
+        }
+
+        // Guard (passes before and after): one client saw the video and it isn't live, so that's
+        // the answer, not a bot check.
+        @Test
+        fun `should throw a plain VideoUnplayableException when one client answers and the rest are bot-checked`() =
+            runTest {
+                val http = mockk<HttpController>()
+                val videoController = mockk<VideoController>()
+                coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } returns botChecked()
+                coEvery { videoController.getPlayerResponseViaAndroidClient(any(), any()) } returns botChecked()
+                coEvery { videoController.getPlayerResponseViaAndroidMobileClient(any()) } returns notLive()
+                coEvery { videoController.getPlayerResponseViaIosClient(any()) } returns botChecked()
+
+                val ex = shouldThrow<VideoUnplayableException> {
+                    StreamClient(http, videoController).getHttpLiveStreamUrl(videoId)
+                }
+
+                ex::class shouldBe VideoUnplayableException::class
+            }
     }
 }

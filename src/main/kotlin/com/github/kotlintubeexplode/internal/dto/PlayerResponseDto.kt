@@ -98,6 +98,17 @@ data class PlayabilityStatusDto(
                 reason?.contains("Sign in to confirm your age", ignoreCase = true) == true
 
     /**
+     * Returns true if this response is YouTube's bot check rather than an answer about the video.
+     *
+     * The bot check is LOGIN_REQUIRED with the reason "Sign in to confirm you’re not a bot" (curly
+     * apostrophe) and no videoDetails. Matching "not a bot" sidesteps the apostrophe. NewPipe
+     * checks the same status and phrase (SignInConfirmNotBotException).
+     */
+    val isBotCheck: Boolean
+        get() = status?.equals("LOGIN_REQUIRED", ignoreCase = true) == true &&
+                reason?.contains("not a bot", ignoreCase = true) == true
+
+    /**
      * Preview/trailer video id for pay-to-play videos, or null.
      *
      * Mirrors upstream PlayerResponse.PreviewVideoId (PlayerResponse.cs L94-122): when a video

@@ -3,6 +3,7 @@ package com.github.kotlintubeexplode.internal
 import com.github.kotlintubeexplode.common.Author
 import com.github.kotlintubeexplode.common.Thumbnail
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.BotCheckException
 import com.github.kotlintubeexplode.exceptions.VideoUnavailableException
 import com.github.kotlintubeexplode.internal.cipher.CipherManifest
 import com.github.kotlintubeexplode.internal.cipher.PlayerScriptParser
@@ -158,6 +159,7 @@ internal class VideoController(
      *
      * @param videoId The validated video ID
      * @return The Video domain model
+     * @throws BotCheckException if YouTube's bot check blocked us
      * @throws VideoUnavailableException if the video is not available
      * @throws VideoParseException if parsing fails
      */
@@ -189,8 +191,9 @@ internal class VideoController(
             getPlayerResponseViaAndroidClient(videoId)
         }
 
-        // Step 4: Validate video availability
-        validateAvailability(videoId, playerResponse)
+        // Step 4: Validate video availability. After a fallback the watch page's answer counts too,
+        // so a bot-checked ANDROID_VR doesn't hide a watch page that said "This video is private".
+        validateAvailability(videoId, playerResponse, watchPage = fromWatchPage)
 
         // Step 5: Build domain model
         return buildVideo(videoId, playerResponse)
@@ -504,11 +507,13 @@ internal class VideoController(
      * AGE_VERIFICATION_REQUIRED, etc. — videos in these states still expose title /
      * author / thumbnails) but stream-unplayable. Stream extraction has its own
      * `isPlayable` gate in StreamClient.
+     *
+     * [watchPage] is the watch page's own response when [response] came from the player API
+     * fallback instead. It's a [BotCheckException] only if both were bot-checked.
      */
-    private fun validateAvailability(videoId: VideoId, response: PlayerResponseDto) {
+    private fun validateAvailability(videoId: VideoId, response: PlayerResponseDto, watchPage: PlayerResponseDto?) {
         if (!response.isAvailable) {
-            val reason = response.playabilityStatus?.reason ?: "Unknown error"
-            throw VideoUnavailableException("Video '${videoId.value}' is unavailable: $reason")
+            throw unavailableVideoException(videoId, listOfNotNull(watchPage, response).distinct())
         }
     }
 

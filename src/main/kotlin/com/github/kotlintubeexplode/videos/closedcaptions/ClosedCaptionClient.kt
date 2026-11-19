@@ -2,9 +2,11 @@ package com.github.kotlintubeexplode.videos.closedcaptions
 
 import com.github.kotlintubeexplode.common.Language
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.BotCheckException
 import com.github.kotlintubeexplode.exceptions.RequestLimitExceededException
 import com.github.kotlintubeexplode.internal.HttpController
 import com.github.kotlintubeexplode.internal.VideoController
+import com.github.kotlintubeexplode.internal.allBotChecked
 import com.github.kotlintubeexplode.internal.isNetworkFailure
 import com.github.kotlintubeexplode.internal.dto.ClosedCaptionTrackResponseDto
 import com.github.kotlintubeexplode.internal.dto.PlayerResponseDto
@@ -12,6 +14,7 @@ import com.github.kotlintubeexplode.internal.requireGoogleHttpsUrl
 import com.github.kotlintubeexplode.internal.safeFileIn
 import com.github.kotlintubeexplode.internal.setQueryParameter
 import com.github.kotlintubeexplode.internal.toSafeFilePath
+import com.github.kotlintubeexplode.internal.unavailableVideoException
 import kotlinx.coroutines.CancellationException
 import java.io.File
 import java.io.Writer
@@ -29,6 +32,8 @@ class ClosedCaptionClient internal constructor(
      *
      * @param videoId The video ID
      * @return The closed caption manifest containing available tracks
+     * @throws BotCheckException if YouTube's bot check blocked every client, so we can't tell
+     *   whether the video has captions
      */
     suspend fun getManifest(videoId: VideoId): ClosedCaptionManifest {
         // Source the tracklist from the youtubei/v1/player API like upstream's
@@ -42,7 +47,7 @@ class ClosedCaptionClient internal constructor(
         // limit applies to the whole IP, so it stops at once.
         var lastError: Exception? = null
         var networkFailure: Exception? = null
-        var anyResponse = false
+        val responses = mutableListOf<PlayerResponseDto>()
         for (request in captionClients(videoId)) {
             val playerResponse = try {
                 request()
@@ -54,7 +59,7 @@ class ClosedCaptionClient internal constructor(
                 if (e.isNetworkFailure()) networkFailure = networkFailure ?: e else lastError = e
                 continue
             }
-            anyResponse = true
+            responses += playerResponse
             val tracks = trackInfosOf(playerResponse)
             if (tracks.isNotEmpty()) {
                 return ClosedCaptionManifest(tracks)
@@ -63,10 +68,14 @@ class ClosedCaptionClient internal constructor(
 
         // No client had tracks. If a request failed on the network we don't actually know that
         // the video has none, so surface the failure rather than an empty manifest. Likewise if
-        // every request failed for client-specific reasons.
+        // every request failed for client-specific reasons, or every client that answered was
+        // bot-checked.
         networkFailure?.let { throw it }
-        if (!anyResponse && lastError != null) {
+        if (responses.isEmpty() && lastError != null) {
             throw lastError
+        }
+        if (responses.allBotChecked()) {
+            throw unavailableVideoException(videoId, responses)
         }
         return ClosedCaptionManifest(emptyList())
     }

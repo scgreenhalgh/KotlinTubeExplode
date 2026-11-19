@@ -1,6 +1,7 @@
 package com.github.kotlintubeexplode.videos.streams
 
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.BotCheckException
 import com.github.kotlintubeexplode.exceptions.RequestLimitExceededException
 import com.github.kotlintubeexplode.exceptions.VideoRequiresPurchaseException
 import com.github.kotlintubeexplode.exceptions.VideoUnavailableException
@@ -491,5 +492,50 @@ class StreamClientFallbackTest {
 
             manifest.streams shouldHaveSize 1
         }
+    }
+
+    @Nested
+    @DisplayName("bot check (v1.4.0)")
+    inner class BotCheckTests {
+        // YouTube's bot check looks like an unavailable video (LOGIN_REQUIRED, no videoDetails), so
+        // it used to arrive as a plain VideoUnavailableException. When every client was blocked we
+        // don't know whether the video exists, so say so with BotCheckException. If any client
+        // gave a real answer about the video, that answer wins.
+
+        @Test
+        fun `should throw BotCheckException when every cipher-less client is bot-checked`() = runTest {
+            val http = mockk<HttpController>()
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } returns botChecked()
+            coEvery { videoController.getPlayerResponseViaAndroidClient(any(), any()) } returns botChecked()
+            coEvery { videoController.getPlayerResponseViaAndroidMobileClient(any()) } returns botChecked()
+            coEvery { videoController.getPlayerResponseViaIosClient(any()) } returns botChecked()
+
+            val ex = shouldThrow<BotCheckException> { StreamClient(http, videoController).getManifest(videoId) }
+
+            ex.message shouldContain videoId.value
+            ex.message shouldContain "not a bot"
+            // Not retried by getManifest (retrying won't fix IP reputation), and no TV fallback.
+            coVerify(exactly = 1) { videoController.getPlayerResponseViaVisionosClient(any()) }
+            coVerify(exactly = 0) { videoController.getPlayerResponseViaTVEmbeddedClient(any(), any()) }
+        }
+
+        @Test
+        fun `should throw a plain VideoUnavailableException with the real reason when one client says private`() =
+            runTest {
+                val http = mockk<HttpController>()
+                val videoController = mockk<VideoController>()
+                coEvery { videoController.getPlayerResponseViaVisionosClient(any()) } returns botChecked()
+                coEvery { videoController.getPlayerResponseViaAndroidClient(any(), any()) } returns botChecked()
+                coEvery { videoController.getPlayerResponseViaAndroidMobileClient(any()) } returns privateVideo()
+                coEvery { videoController.getPlayerResponseViaIosClient(any()) } returns botChecked()
+
+                val ex = shouldThrow<VideoUnavailableException> {
+                    StreamClient(http, videoController).getManifest(videoId)
+                }
+
+                ex::class shouldBe VideoUnavailableException::class
+                ex.message shouldContain "This video is private"
+            }
     }
 }

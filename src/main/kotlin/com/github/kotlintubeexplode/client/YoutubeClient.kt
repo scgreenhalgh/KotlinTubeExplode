@@ -165,6 +165,7 @@ class YoutubeClient(
      *
      * @return The video metadata
      * @throws IllegalArgumentException if the URL/ID is invalid
+     * @throws BotCheckException if YouTube's bot check blocked us (a subclass of VideoUnavailableException)
      * @throws VideoUnavailableException if the video is not available
      * @throws VideoParseException if parsing fails
      */
@@ -179,6 +180,7 @@ class YoutubeClient(
      *
      * @param videoId The validated video ID
      * @return The video metadata
+     * @throws BotCheckException if YouTube's bot check blocked us (a subclass of VideoUnavailableException)
      * @throws VideoUnavailableException if the video is not available
      * @throws VideoParseException if parsing fails
      */

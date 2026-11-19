@@ -1,6 +1,7 @@
 package com.github.kotlintubeexplode.videos.closedcaptions
 
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.BotCheckException
 import com.github.kotlintubeexplode.exceptions.RequestLimitExceededException
 import com.github.kotlintubeexplode.internal.HttpController
 import com.github.kotlintubeexplode.internal.VideoController
@@ -13,6 +14,7 @@ import com.github.kotlintubeexplode.internal.dto.PlayerResponseDto
 import io.kotest.assertions.throwables.shouldNotThrowAny
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -197,6 +199,57 @@ class ClosedCaptionClientTest {
                 ClosedCaptionClient(http, videoController).getManifest(videoId)
             }
             coVerify(exactly = 0) { videoController.getPlayerResponseViaAndroidClient(videoId, any()) }
+        }
+    }
+
+    @Nested
+    @DisplayName("bot check (v1.4.0)")
+    inner class BotCheckTests {
+        // An empty manifest says "this video has no captions". When every client was bot-checked
+        // we don't know that, the same reasoning v1.3.3 applied to network failures.
+
+        private val videoId = VideoId("YltHGKX80Y8")
+
+        private fun noCaptions() = PlayerResponseDto(playabilityStatus = PlayabilityStatusDto(status = "OK"))
+
+        private fun botChecked() = PlayerResponseDto(
+            playabilityStatus = PlayabilityStatusDto(
+                status = "LOGIN_REQUIRED",
+                reason = "Sign in to confirm you’re not a bot"
+            )
+        )
+
+        @Test
+        fun `should throw BotCheckException when every client is bot-checked`() = runTest {
+            val http = mockk<HttpController>(relaxed = true)
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(videoId) } returns botChecked()
+            coEvery { videoController.getPlayerResponseViaAndroidClient(videoId, any()) } returns botChecked()
+            coEvery { videoController.getPlayerResponseViaAndroidMobileClient(videoId) } returns botChecked()
+            coEvery { videoController.getPlayerResponseViaIosClient(videoId) } returns botChecked()
+
+            val ex = shouldThrow<BotCheckException> {
+                ClosedCaptionClient(http, videoController).getManifest(videoId)
+            }
+
+            ex.message shouldContain videoId.value
+            ex.message shouldContain "not a bot"
+        }
+
+        // Guard (passes before and after): VISIONOS saw the video and it has no tracks, so the
+        // empty manifest is a real answer even though the other clients were bot-checked.
+        @Test
+        fun `should return an empty manifest when one client answers and the rest are bot-checked`() = runTest {
+            val http = mockk<HttpController>(relaxed = true)
+            val videoController = mockk<VideoController>()
+            coEvery { videoController.getPlayerResponseViaVisionosClient(videoId) } returns noCaptions()
+            coEvery { videoController.getPlayerResponseViaAndroidClient(videoId, any()) } returns botChecked()
+            coEvery { videoController.getPlayerResponseViaAndroidMobileClient(videoId) } returns botChecked()
+            coEvery { videoController.getPlayerResponseViaIosClient(videoId) } returns botChecked()
+
+            val manifest = ClosedCaptionClient(http, videoController).getManifest(videoId)
+
+            manifest.tracks.size shouldBe 0
         }
     }
 }

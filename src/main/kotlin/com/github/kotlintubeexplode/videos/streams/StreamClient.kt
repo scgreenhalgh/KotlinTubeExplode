@@ -2,6 +2,7 @@ package com.github.kotlintubeexplode.videos.streams
 
 import com.github.kotlintubeexplode.common.Language
 import com.github.kotlintubeexplode.core.VideoId
+import com.github.kotlintubeexplode.exceptions.BotCheckException
 import com.github.kotlintubeexplode.exceptions.RequestLimitExceededException
 import com.github.kotlintubeexplode.exceptions.VideoRequiresPurchaseException
 import com.github.kotlintubeexplode.exceptions.VideoUnavailableException
@@ -51,6 +52,9 @@ class StreamClient internal constructor(
      *
      * @param videoId The video ID
      * @return The stream manifest containing all available streams
+     * @throws BotCheckException if YouTube's bot check blocked every client (not retried)
+     * @throws VideoUnavailableException if the video is unavailable (deleted, private, etc.)
+     * @throws VideoUnplayableException if no client returned a playable stream
      */
     suspend fun getManifest(videoId: VideoId): StreamManifest {
         var lastException: Exception? = null
@@ -97,16 +101,17 @@ class StreamClient internal constructor(
      *
      * @param videoId The video ID
      * @return The HLS manifest URL
-     * @throws IllegalArgumentException if the video is not a live stream
-     * @throws IllegalStateException if HLS URL is not available
+     * @throws BotCheckException if YouTube's bot check blocked every client
+     * @throws VideoUnplayableException if no client has an HLS URL (not a live stream)
      */
     suspend fun getHttpLiveStreamUrl(videoId: VideoId): String {
         // The web watch page no longer carries hlsManifestUrl for live streams, so read it from
         // the cipher-less player responses, as upstream 6.6.2 does (GetPlayerResponseAsync).
         // Any client's HLS URL will do, so a failed request moves on to the next client. If none
         // has a URL and a request failed on the network, that failure is the real answer; a rate
-        // limit applies to the whole IP, so it stops the chain at once.
-        var firstReason: String? = null
+        // limit applies to the whole IP, so it stops the chain at once. If every client that
+        // answered was bot-checked, we don't know whether it's live, so that's a BotCheckException.
+        val responses = mutableListOf<PlayerResponseDto>()
         var networkFailure: Exception? = null
         for (client in cipherlessClients(videoId)) {
             val response = try {
@@ -120,14 +125,15 @@ class StreamClient internal constructor(
                 continue
             }
             response.streamingData?.hlsManifestUrl?.let { return it }
-            firstReason = firstReason ?: response.playabilityStatus?.reason
+            responses += response
         }
 
         networkFailure?.let { throw it }
-        throw VideoUnplayableException(
-            "HLS manifest URL not available for video '${videoId.value}': " +
-                (firstReason ?: "not a live stream")
-        )
+        val firstReason = responses.firstNotNullOfOrNull { it.playabilityStatus?.reason }
+        val message = "HLS manifest URL not available for video '${videoId.value}': " +
+            (firstReason ?: "not a live stream")
+        if (responses.allBotChecked()) throw BotCheckException(message)
+        throw VideoUnplayableException(message)
     }
 
     /**
@@ -294,11 +300,11 @@ class StreamClient internal constructor(
         // VideoUnavailableException carrying playabilityStatus.reason, not a generic "no streams".
         // isAvailable mirrors upstream PlayerResponse.IsAvailable (status != "error" && videoDetails
         // present). Like upstream 6.6.2, only trust it when no client saw the video as available:
-        // a bot-checked response fails isAvailable too. Throw before the TV fallback, which has
+        // a bot-checked response fails isAvailable too. If every client was bot-checked, it's a
+        // BotCheckException instead (beyond upstream). Throw before the TV fallback, which has
         // nothing to recover for such a video.
         if (responses.isNotEmpty() && responses.none { it.isAvailable }) {
-            val reason = responses.firstNotNullOfOrNull { it.playabilityStatus?.reason } ?: "Unknown error"
-            throw VideoUnavailableException("Video '${videoId.value}' is unavailable: $reason")
+            throw unavailableVideoException(videoId, responses)
         }
 
         // The video is available but no cipher-less client exposed usable streams: either

@@ -2,6 +2,18 @@
 
 All notable changes to KotlinTubeExplode are recorded here. Versions follow [Semantic Versioning](https://semver.org/), dates are ISO 8601, and each release links to its full notes on [GitHub](https://github.com/scgreenhalgh/KotlinTubeExplode/releases).
 
+## [1.4.0] - 2026-11-19
+
+You can now tell YouTube's bot check apart from a video that's actually gone. Additive: existing `catch` blocks keep working.
+
+### Added
+- **`BotCheckException`.** When YouTube answers every client we try with "Sign in to confirm you're not a bot", you get `BotCheckException` instead of a plain `VideoUnavailableException`. It's about your network or IP, not the video, so show "try again later" rather than "video not found". Retrying straight away won't help, and `getManifest` doesn't retry it. It extends `VideoUnavailableException`, so code that already catches that still sees it. Put a `catch (e: BotCheckException)` above it if you want to handle it separately.
+
+### Changed
+- `streams.getManifest`, `videos.get`, `streams.getHttpLiveStreamUrl` and `closedCaptions.getManifest` throw `BotCheckException` only when every client that answered was bot-checked. If any client gives a real answer (private, not live, no captions), you get that answer as before, and its reason now goes in the message ahead of the bot check's.
+- `closedCaptions.getManifest` used to return an empty manifest when every client was bot-checked, which looked like "this video has no captions". It throws `BotCheckException` now. If you call it without a `try`, add one.
+- `getHttpLiveStreamUrl` throws `BotCheckException` (a `VideoUnplayableException` subclass) where it threw a plain `VideoUnplayableException` before, with the same message.
+
 ## [1.3.3] - 2026-11-19
 
 Copes much better with slow or flaky networks. No API changes — a drop-in from 1.3.2.
